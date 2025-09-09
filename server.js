@@ -151,6 +151,18 @@ function validateMetadataRequest(query) {
   return { valid: true };
 }
 
+// Root endpoint - redirect to health check
+app.get('/', (req, res) => {
+  res.json({ 
+    service: 'RadioDock Metadata Proxy',
+    status: 'ok',
+    endpoints: {
+      health: '/health',
+      metadata: '/v1/metadata'
+    }
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
@@ -280,8 +292,12 @@ app.use((req, res) => {
   });
 });
 
-app.listen(port, () => {
-  logger.info({ port }, 'RadioDock metadata proxy server started');
+app.listen(port, '0.0.0.0', () => {
+  logger.info({ 
+    port, 
+    env: process.env.NODE_ENV || 'development',
+    endpoints: ['/', '/health', '/v1/metadata']
+  }, 'RadioDock metadata proxy server started');
 });
 
 module.exports = app;

@@ -443,8 +443,12 @@ async function fetchIcecastMetadata(endpoints, mount) {
 // ICY metadata parsing with stream data extraction
 async function fetchICYMetadata(streamUrl) {
   return new Promise((resolve) => {
+    let resolved = false;
     const timeout = setTimeout(() => {
-      resolve(null);
+      if (!resolved) {
+        resolved = true;
+        resolve(null);
+      }
     }, DEFAULT_TIMEOUT);
 
     try {
@@ -480,15 +484,18 @@ async function fetchICYMetadata(streamUrl) {
               
               if (!isGeneric) {
                 stream.destroy();
-                resolve({
-                  source: 'icy',
-                  display: nowPlaying,
-                  artist: parsed.StreamArtist || null,
-                  title: parsed.StreamTitle || null,
-                  raw: parsed,
-                  confidence: 0.9,
-                  cacheTtl: 15
-                });
+                if (!resolved) {
+                  resolved = true;
+                  resolve({
+                    source: 'icy',
+                    display: nowPlaying,
+                    artist: parsed.StreamArtist || null,
+                    title: parsed.StreamTitle || null,
+                    raw: parsed,
+                    confidence: 0.9,
+                    cacheTtl: 15
+                  });
+                }
                 return;
               }
             }
@@ -499,29 +506,41 @@ async function fetchICYMetadata(streamUrl) {
             
             if (icyName && icyName !== icyDescription) {
               stream.destroy();
-              resolve({
-                source: 'icy-headers',
-                display: icyName,
-                artist: null,
-                title: null,
-                raw: { headers: res.headers },
-                confidence: 0.6,
-                cacheTtl: 30
-              });
+              if (!resolved) {
+                resolved = true;
+                resolve({
+                  source: 'icy-headers',
+                  display: icyName,
+                  artist: null,
+                  title: null,
+                  raw: { headers: res.headers },
+                  confidence: 0.6,
+                  cacheTtl: 30
+                });
+              }
               return;
             }
             
             stream.destroy();
-            resolve(null);
+            if (!resolved) {
+              resolved = true;
+              resolve(null);
+            }
           } catch (error) {
             stream.destroy();
-            resolve(null);
+            if (!resolved) {
+              resolved = true;
+              resolve(null);
+            }
           }
         });
         
         res.on('error', () => {
           stream.destroy();
-          resolve(null);
+          if (!resolved) {
+            resolved = true;
+            resolve(null);
+          }
         });
         
         // Read some data to trigger metadata
@@ -532,6 +551,7 @@ async function fetchICYMetadata(streamUrl) {
             // Give it a moment to receive metadata
             setTimeout(() => {
               if (!resolved) {
+                resolved = true;
                 stream.destroy();
                 resolve(null);
               }
@@ -542,12 +562,18 @@ async function fetchICYMetadata(streamUrl) {
       
       stream.on('error', () => {
         clearTimeout(timeout);
-        resolve(null);
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
       });
       
     } catch (error) {
       clearTimeout(timeout);
-      resolve(null);
+      if (!resolved) {
+        resolved = true;
+        resolve(null);
+      }
     }
   });
 }
