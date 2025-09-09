@@ -52,142 +52,215 @@ app.get('/', (req, res) => {
 // Main metadata endpoint
 app.get('/metadata', async (req, res) => {
   const { url: streamUrl } = req.query;
+  const requestId = Math.random().toString(36).substring(7);
+  
+  console.log(`\n🎵 [${requestId}] METADATA REQUEST START`);
+  console.log(`📡 [${requestId}] Stream URL: ${streamUrl}`);
   
   if (!streamUrl) {
+    console.log(`❌ [${requestId}] Missing stream URL parameter`);
     return res.status(400).json({
       error: 'Missing required parameter: url'
     });
   }
 
   try {
-    const metadata = await fetchMetadata(streamUrl);
+    const startTime = Date.now();
+    const metadata = await fetchMetadata(streamUrl, requestId);
+    const duration = Date.now() - startTime;
+    
+    if (metadata) {
+      console.log(`✅ [${requestId}] SUCCESS: Found metadata via ${metadata.source}`);
+      console.log(`🎶 [${requestId}] Now Playing: "${metadata.nowPlaying}"`);
+      console.log(`⏱️  [${requestId}] Total fetch time: ${duration}ms`);
+    } else {
+      console.log(`❌ [${requestId}] NO METADATA FOUND after ${duration}ms`);
+    }
+    
     res.json({
       success: true,
       url: streamUrl,
       metadata: metadata || null,
+      fetchTime: duration,
       timestamp: new Date().toISOString()
     });
+    
+    console.log(`📤 [${requestId}] METADATA REQUEST END\n`);
   } catch (error) {
-    console.error('Metadata fetch error:', error.message);
+    console.error(`💥 [${requestId}] Metadata fetch error:`, error.message);
+    console.error(`💥 [${requestId}] Stack trace:`, error.stack);
     res.status(500).json({
       success: false,
       error: error.message,
       url: streamUrl,
       timestamp: new Date().toISOString()
     });
+    console.log(`📤 [${requestId}] METADATA REQUEST END (ERROR)\n`);
   }
 });
 
 // Main metadata fetching logic
-async function fetchMetadata(streamUrl) {
+async function fetchMetadata(streamUrl, requestId) {
   const strategies = [
-    () => fetchNTSMetadata(streamUrl),
-    () => fetchAirtimeProMetadata(streamUrl),
-    () => fetchRadioKingMetadata(streamUrl),
-    () => fetchIcecastMetadata(streamUrl),
-    () => fetchICYMetadata(streamUrl),
-    () => fetchGenericMetadata(streamUrl)
+    { name: 'NTS', fn: () => fetchNTSMetadata(streamUrl, requestId) },
+    { name: 'Airtime Pro', fn: () => fetchAirtimeProMetadata(streamUrl, requestId) },
+    { name: 'RadioKing', fn: () => fetchRadioKingMetadata(streamUrl, requestId) },
+    { name: 'Icecast JSON', fn: () => fetchIcecastMetadata(streamUrl, requestId) },
+    { name: 'ICY Headers', fn: () => fetchICYMetadata(streamUrl, requestId) },
+    { name: 'Generic APIs', fn: () => fetchGenericMetadata(streamUrl, requestId) }
   ];
 
-  for (const strategy of strategies) {
+  console.log(`🔄 [${requestId}] Testing ${strategies.length} metadata strategies...`);
+
+  for (let i = 0; i < strategies.length; i++) {
+    const strategy = strategies[i];
+    const strategyStart = Date.now();
+    
+    console.log(`🧪 [${requestId}] Strategy ${i + 1}/${strategies.length}: ${strategy.name}`);
+    
     try {
-      const result = await strategy();
-      if (result && result.nowPlaying) {
-        console.log(`Found metadata via strategy: ${result.source || 'unknown'}`);
+      const result = await strategy.fn();
+      const strategyTime = Date.now() - strategyStart;
+      
+      if (result && result.nowPlaying && result.nowPlaying.trim().length > 0) {
+        console.log(`✅ [${requestId}] ${strategy.name} SUCCESS (${strategyTime}ms): "${result.nowPlaying}"`);
         return result;
+      } else {
+        console.log(`⚪ [${requestId}] ${strategy.name} returned empty result (${strategyTime}ms)`);
       }
     } catch (error) {
-      // Continue to next strategy
+      const strategyTime = Date.now() - strategyStart;
+      console.log(`❌ [${requestId}] ${strategy.name} failed (${strategyTime}ms): ${error.message}`);
       continue;
     }
   }
 
+  console.log(`❌ [${requestId}] All ${strategies.length} strategies exhausted - no metadata found`);
   return null;
 }
 
 // NTS Live metadata
-async function fetchNTSMetadata(streamUrl) {
+async function fetchNTSMetadata(streamUrl, requestId) {
   if (!streamUrl.includes('nts') && !streamUrl.includes('nts.live')) {
+    console.log(`⚪ [${requestId}] NTS: Not an NTS URL, skipping`);
     return null;
   }
 
+  const apiUrl = 'https://www.nts.live/api/v2/live';
+  console.log(`🔍 [${requestId}] NTS: Fetching from ${apiUrl}`);
+
   try {
-    const response = await fetchWithTimeout('https://www.nts.live/api/v2/live', {
+    const response = await fetchWithTimeout(apiUrl, {
       cache: 'no-store'
     });
 
-    if (!response.ok) return null;
+    console.log(`🌍 [${requestId}] NTS: API response status ${response.status}`);
+    if (!response.ok) {
+      console.log(`❌ [${requestId}] NTS: API returned ${response.status}: ${response.statusText}`);
+      return null;
+    }
     
     const data = await response.json();
+    console.log(`📊 [${requestId}] NTS: Response data:`, JSON.stringify(data, null, 2));
+    
     const liveShow = data.results && data.results[0];
     
     if (liveShow && liveShow.now) {
       const show = liveShow.now;
+      const nowPlaying = `${show.broadcast_title || 'NTS Live'} - ${show.name || 'Live Show'}`;
+      console.log(`✅ [${requestId}] NTS: Found show data - "${nowPlaying}"`);
       return {
-        nowPlaying: `${show.broadcast_title || 'NTS Live'} - ${show.name || 'Live Show'}`,
+        nowPlaying: nowPlaying,
         source: 'nts'
       };
+    } else {
+      console.log(`⚪ [${requestId}] NTS: No live show data found in response`);
     }
   } catch (error) {
-    console.error('NTS metadata failed:', error.message);
+    console.error(`❌ [${requestId}] NTS metadata failed:`, error.message);
   }
   
   return null;
 }
 
 // Airtime Pro metadata
-async function fetchAirtimeProMetadata(streamUrl) {
+async function fetchAirtimeProMetadata(streamUrl, requestId) {
   try {
     const urlObj = new URL(streamUrl);
     const host = urlObj.hostname || '';
+    console.log(`🔍 [${requestId}] Airtime Pro: Analyzing host "${host}"`);
     
     // Check for Airtime Pro pattern
     const airtimeMatch = host.match(/^(.+)\.out\.airtime\.pro$/);
     if (airtimeMatch) {
       const endpoint = `https://${airtimeMatch[1]}.airtime.pro/api/live-info-v2`;
+      console.log(`📡 [${requestId}] Airtime Pro: Detected pattern, trying ${endpoint}`);
       
       const response = await fetchWithTimeout(endpoint, {
         cache: 'no-store'
       }, 3000);
       
-      if (!response.ok) return null;
+      console.log(`🌍 [${requestId}] Airtime Pro: Response status ${response.status}`);
+      if (!response.ok) {
+        console.log(`❌ [${requestId}] Airtime Pro: API returned ${response.status}: ${response.statusText}`);
+        return null;
+      }
       
       const data = await response.json();
+      console.log(`📊 [${requestId}] Airtime Pro: Response data:`, JSON.stringify(data, null, 2));
+      
       if (data && data.shows && data.shows.current) {
         const current = data.shows.current;
+        const nowPlaying = `${current.name || 'Live Show'} - ${current.description || ''}`.trim();
+        console.log(`✅ [${requestId}] Airtime Pro: Found show "${nowPlaying}"`);
         return {
-          nowPlaying: `${current.name || 'Live Show'} - ${current.description || ''}`.trim(),
+          nowPlaying: nowPlaying,
           source: 'airtimepro'
         };
+      } else {
+        console.log(`⚪ [${requestId}] Airtime Pro: No current show data found`);
       }
     }
     
     // Special case for Cashmere Radio
     if (streamUrl.toLowerCase().includes('cashmere') || host.includes('cashmereradio')) {
-      const response = await fetchWithTimeout('https://cashmereradio.airtime.pro/api/live-info-v2', {
+      const endpoint = 'https://cashmereradio.airtime.pro/api/live-info-v2';
+      console.log(`📡 [${requestId}] Airtime Pro: Cashmere detected, trying ${endpoint}`);
+      
+      const response = await fetchWithTimeout(endpoint, {
         cache: 'no-store'
       }, 3000);
       
+      console.log(`🌍 [${requestId}] Airtime Pro Cashmere: Response status ${response.status}`);
       if (response.ok) {
         const data = await response.json();
+        console.log(`📊 [${requestId}] Airtime Pro Cashmere: Response data:`, JSON.stringify(data, null, 2));
+        
         if (data && data.shows && data.shows.current) {
           const current = data.shows.current;
+          const nowPlaying = `${current.name || 'Cashmere Radio'} - ${current.description || ''}`.trim();
+          console.log(`✅ [${requestId}] Airtime Pro Cashmere: Found show "${nowPlaying}"`);
           return {
-            nowPlaying: `${current.name || 'Cashmere Radio'} - ${current.description || ''}`.trim(),
+            nowPlaying: nowPlaying,
             source: 'airtimepro-cashmere'
           };
+        } else {
+          console.log(`⚪ [${requestId}] Airtime Pro Cashmere: No current show data found`);
         }
       }
+    } else {
+      console.log(`⚪ [${requestId}] Airtime Pro: No recognizable patterns found`);
     }
   } catch (error) {
-    console.error('Airtime Pro metadata failed:', error.message);
+    console.error(`❌ [${requestId}] Airtime Pro metadata failed:`, error.message);
   }
   
   return null;
 }
 
 // RadioKing metadata
-async function fetchRadioKingMetadata(streamUrl) {
+async function fetchRadioKingMetadata(streamUrl, requestId) {
+  console.log(`🔍 [${requestId}] RadioKing: Analyzing URL for RadioKing patterns`);
   try {
     const urlObj = new URL(streamUrl);
     const pathMatch = urlObj.pathname.match(/\/radio\/(\d+)/);
@@ -290,7 +363,8 @@ async function fetchIcecastMetadata(streamUrl) {
 }
 
 // ICY metadata extraction
-async function fetchICYMetadata(streamUrl) {
+async function fetchICYMetadata(streamUrl, requestId) {
+  console.log(`🔍 [${requestId}] ICY: Attempting direct stream header extraction from ${streamUrl}`);
   try {
     const response = await fetchWithTimeout(streamUrl, {
       method: 'GET',
@@ -300,14 +374,30 @@ async function fetchICYMetadata(streamUrl) {
       }
     }, 8000);
     
-    if (!response.ok) return null;
+    console.log(`🌍 [${requestId}] ICY: Stream response status ${response.status}`);
+    if (!response.ok) {
+      console.log(`❌ [${requestId}] ICY: Stream returned ${response.status}: ${response.statusText}`);
+      return null;
+    }
+    
+    // Log all response headers
+    console.log(`📊 [${requestId}] ICY: Response headers:`);
+    for (const [key, value] of response.headers.entries()) {
+      console.log(`   ${key}: ${value}`);
+    }
     
     const icyMetaInt = parseInt(response.headers.get('icy-metaint'));
-    if (!icyMetaInt || icyMetaInt <= 0) return null;
+    console.log(`📊 [${requestId}] ICY: icy-metaint header value: ${icyMetaInt}`);
+    
+    if (!icyMetaInt || icyMetaInt <= 0) {
+      console.log(`❌ [${requestId}] ICY: No valid icy-metaint found, stream doesn't support ICY metadata`);
+      return null;
+    }
     
     // Read stream data to extract ICY metadata
     const buffer = await response.arrayBuffer();
     const data = new Uint8Array(buffer);
+    console.log(`📊 [${requestId}] ICY: Downloaded ${data.length} bytes of stream data`);
     
     if (data.length > icyMetaInt) {
       const metaLength = data[icyMetaInt] * 16;
@@ -333,7 +423,8 @@ async function fetchICYMetadata(streamUrl) {
 }
 
 // Generic metadata endpoints
-async function fetchGenericMetadata(streamUrl) {
+async function fetchGenericMetadata(streamUrl, requestId) {
+  console.log(`🔍 [${requestId}] Generic: Testing common metadata endpoints`);
   try {
     const urlObj = new URL(streamUrl);
     
