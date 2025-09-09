@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: radio-metadata-proxy
+    name: radiodock-metadata-proxy
     env: node
     plan: free
     buildCommand: npm install
@@ -8,7 +8,7 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-    scaling:
-      minInstances: 1
-      maxInstances: 3
-    healthCheckPath: /
+      - key: LOG_LEVEL
+        value: info
+    healthCheckPath: /health
+    autoDeploy: true
