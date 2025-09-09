@@ -34,6 +34,32 @@ Fetches metadata for a radio stream.
 }
 ```
 
+### GET `/inspect?url=STREAM_URL`
+Inspects likely metadata endpoints for a given stream URL and returns a quick summary of which candidates respond and how. Useful to understand differing data structures across hosts (Airtime Pro, Icecast, NTS, generic JSON, etc.).
+
+Example response snippet:
+```json
+{
+  "success": true,
+  "url": "https://example.com/stream.mp3",
+  "inspected": [
+    {
+      "type": "icecast",
+      "url": "https://example.com/status-json.xsl",
+      "status": 200,
+      "contentType": "application/json",
+      "jsonKeys": ["icestats"],
+      "snippet": "{\n  \"icestats\": { ... }"
+    },
+    {
+      "type": "generic",
+      "url": "https://example.com/nowplaying",
+      "status": 404
+    }
+  ]
+}
+```
+
 ## Supported Metadata Sources
 
 1. **NTS Live**: Official NTS Live API
@@ -42,6 +68,12 @@ Fetches metadata for a radio stream.
 4. **Icecast**: JSON status endpoints (`/status-json.xsl`, `/stats.json`)
 5. **ICY Headers**: Direct stream metadata parsing
 6. **Generic APIs**: Common metadata endpoints (`/nowplaying`, `/current`, etc.)
+
+Stations known to work with built-in strategies:
+- NTS (API): `https://www.nts.live/api/v2/live` (handles `stream` and `stream2`)
+- Airtime Pro: Kiosk, Cashmere, dublab.de, Radio 80000 via `...airtime.pro/api/live-info-v2`
+- Icecast JSON: Callshop Radio via `https://icecast.callshopradio.com/status-json.xsl`
+- ICY headers: Streams like WDR 1Live, IHeart/Revma when supported
 
 ## Local Development
 

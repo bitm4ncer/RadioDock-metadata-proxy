@@ -5,6 +5,63 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// HTML entity decoder and text cleaner
+function decodeAndClean(text) {
+  if (!text || typeof text !== 'string') return '';
+  
+  // Decode HTML entities
+  let cleaned = text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#0*39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .trim();
+  
+  // Remove common unhelpful prefixes
+  const unwantedPrefixes = [
+    /^Replay\s*-\s*/i,
+    /^Outsiders?\s*-\s*/i,
+    /^Live\s*-\s*/i,
+    /^Stream\s*-\s*/i,
+    /^Radio\s*-\s*/i,
+    /^-\s*$/,
+    /^\s*-\s*/
+  ];
+  
+  for (const prefix of unwantedPrefixes) {
+    cleaned = cleaned.replace(prefix, '').trim();
+  }
+  
+  return cleaned;
+}
+
+// Smart metadata combiner for show + track data
+function combineShowAndTrack(showName, trackName, requestId) {
+  const cleanShow = decodeAndClean(showName);
+  const cleanTrack = decodeAndClean(trackName);
+  
+  if (requestId) {
+    console.log(`🔄 [${requestId}] Combining: show="${cleanShow}" + track="${cleanTrack}"`);
+  }
+  
+  // If we have both show and track
+  if (cleanShow && cleanTrack) {
+    // Avoid duplication if track already contains show name
+    if (cleanTrack.toLowerCase().includes(cleanShow.toLowerCase())) {
+      return cleanTrack;
+    }
+    return `${cleanShow} - ${cleanTrack}`;
+  }
+  
+  // Return whichever we have
+  return cleanTrack || cleanShow || '';
+}
+
 // Enable CORS for all routes
 app.use(cors({
   origin: '*', // Allow all origins for browser extensions
@@ -183,78 +240,127 @@ async function fetchNTSMetadata(streamUrl, requestId) {
   return null;
 }
 
-// Airtime Pro metadata
+// Enhanced Airtime Pro metadata with smart nested JSON parsing
 async function fetchAirtimeProMetadata(streamUrl, requestId) {
   try {
     const urlObj = new URL(streamUrl);
     const host = urlObj.hostname || '';
     console.log(`🔍 [${requestId}] Airtime Pro: Analyzing host "${host}"`);
     
+    const endpoints = [];
+    
     // Check for Airtime Pro pattern
     const airtimeMatch = host.match(/^(.+)\.out\.airtime\.pro$/);
     if (airtimeMatch) {
-      const endpoint = `https://${airtimeMatch[1]}.airtime.pro/api/live-info-v2`;
-      console.log(`📡 [${requestId}] Airtime Pro: Detected pattern, trying ${endpoint}`);
-      
-      const response = await fetchWithTimeout(endpoint, {
-        cache: 'no-store'
-      }, 3000);
-      
-      console.log(`🌍 [${requestId}] Airtime Pro: Response status ${response.status}`);
-      if (!response.ok) {
-        console.log(`❌ [${requestId}] Airtime Pro: API returned ${response.status}: ${response.statusText}`);
-        return null;
-      }
-      
-      const data = await response.json();
-      console.log(`📊 [${requestId}] Airtime Pro: Response data:`, JSON.stringify(data, null, 2));
-      
-      if (data && data.shows && data.shows.current) {
-        const current = data.shows.current;
-        const nowPlaying = `${current.name || 'Live Show'} - ${current.description || ''}`.trim();
-        console.log(`✅ [${requestId}] Airtime Pro: Found show "${nowPlaying}"`);
-        return {
-          nowPlaying: nowPlaying,
-          source: 'airtimepro'
-        };
-      } else {
-        console.log(`⚪ [${requestId}] Airtime Pro: No current show data found`);
+      endpoints.push(`https://${airtimeMatch[1]}.airtime.pro/api/live-info-v2`);
+    }
+    
+    // Special cases for known Airtime Pro stations
+    const specialCases = {
+      'cashmere': 'https://cashmereradio.airtime.pro/api/live-info-v2',
+      'kiosk': 'https://kioskradio.airtime.pro/api/live-info-v2',
+      'dublab': 'https://dublab.airtime.pro/api/live-info-v2'
+    };
+    
+    for (const [keyword, endpoint] of Object.entries(specialCases)) {
+      if (streamUrl.toLowerCase().includes(keyword) || host.includes(keyword)) {
+        endpoints.push(endpoint);
+        console.log(`📡 [${requestId}] Airtime Pro: ${keyword} detected, adding ${endpoint}`);
       }
     }
     
-    // Special case for Cashmere Radio
-    if (streamUrl.toLowerCase().includes('cashmere') || host.includes('cashmereradio')) {
-      const endpoint = 'https://cashmereradio.airtime.pro/api/live-info-v2';
-      console.log(`📡 [${requestId}] Airtime Pro: Cashmere detected, trying ${endpoint}`);
-      
-      const response = await fetchWithTimeout(endpoint, {
-        cache: 'no-store'
-      }, 3000);
-      
-      console.log(`🌍 [${requestId}] Airtime Pro Cashmere: Response status ${response.status}`);
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`📊 [${requestId}] Airtime Pro Cashmere: Response data:`, JSON.stringify(data, null, 2));
-        
-        if (data && data.shows && data.shows.current) {
-          const current = data.shows.current;
-          const nowPlaying = `${current.name || 'Cashmere Radio'} - ${current.description || ''}`.trim();
-          console.log(`✅ [${requestId}] Airtime Pro Cashmere: Found show "${nowPlaying}"`);
-          return {
-            nowPlaying: nowPlaying,
-            source: 'airtimepro-cashmere'
-          };
-        } else {
-          console.log(`⚪ [${requestId}] Airtime Pro Cashmere: No current show data found`);
-        }
-      }
-    } else {
+    if (endpoints.length === 0) {
       console.log(`⚪ [${requestId}] Airtime Pro: No recognizable patterns found`);
+      return null;
     }
+    
+    // Try each endpoint
+    for (const endpoint of endpoints) {
+      console.log(`📡 [${requestId}] Airtime Pro: Trying ${endpoint}`);
+      
+      try {
+        const response = await fetchWithTimeout(endpoint, {
+          cache: 'no-store'
+        }, 3000);
+        
+        console.log(`🌍 [${requestId}] Airtime Pro: Response status ${response.status}`);
+        if (!response.ok) {
+          console.log(`❌ [${requestId}] Airtime Pro: API returned ${response.status}: ${response.statusText}`);
+          continue;
+        }
+        
+        const data = await response.json();
+        console.log(`📊 [${requestId}] Airtime Pro: Response data:`, JSON.stringify(data, null, 2));
+        
+        // Smart parsing of nested JSON structure
+        const result = parseAirtimeProData(data, requestId);
+        if (result) {
+          return result;
+        }
+        
+      } catch (endpointError) {
+        console.log(`❌ [${requestId}] Airtime Pro: Endpoint ${endpoint} failed: ${endpointError.message}`);
+        continue;
+      }
+    }
+    
+    console.log(`❌ [${requestId}] Airtime Pro: All ${endpoints.length} endpoints failed`);
+    return null;
+    
   } catch (error) {
     console.error(`❌ [${requestId}] Airtime Pro metadata failed:`, error.message);
   }
   
+  return null;
+}
+
+// Smart Airtime Pro data parser
+function parseAirtimeProData(data, requestId) {
+  if (!data || typeof data !== 'object') {
+    console.log(`⚪ [${requestId}] Airtime Pro Parser: Invalid data structure`);
+    return null;
+  }
+  
+  let showName = '';
+  let trackName = '';
+  
+  // Extract show information
+  if (data.shows && data.shows.current && data.shows.current.name) {
+    showName = data.shows.current.name;
+    console.log(`📊 [${requestId}] Airtime Pro Parser: Found show "${showName}"`);
+  }
+  
+  // Extract track information (this is often the actual content)
+  if (data.tracks && data.tracks.current) {
+    const currentTrack = data.tracks.current;
+    if (currentTrack.name) {
+      trackName = currentTrack.name;
+      console.log(`📊 [${requestId}] Airtime Pro Parser: Found track "${trackName}"`);
+    }
+    // Also check nested metadata
+    if (currentTrack.metadata) {
+      const meta = currentTrack.metadata;
+      if (meta.artist_name && meta.track_title) {
+        trackName = `${meta.artist_name} - ${meta.track_title}`;
+        console.log(`📊 [${requestId}] Airtime Pro Parser: Found track metadata "${trackName}"`);
+      } else if (meta.track_title) {
+        trackName = meta.track_title;
+      }
+    }
+  }
+  
+  // Combine show and track intelligently
+  const nowPlaying = combineShowAndTrack(showName, trackName, requestId);
+  
+  if (nowPlaying && nowPlaying.length > 2) {
+    console.log(`✅ [${requestId}] Airtime Pro Parser: Final result "${nowPlaying}"`);
+    return {
+      nowPlaying: nowPlaying,
+      source: 'airtimepro'
+    };
+  }
+  
+  console.log(`⚪ [${requestId}] Airtime Pro Parser: No meaningful metadata found`);
   return null;
 }
 
@@ -401,22 +507,33 @@ async function fetchICYMetadata(streamUrl, requestId) {
     
     if (data.length > icyMetaInt) {
       const metaLength = data[icyMetaInt] * 16;
+      console.log(`📊 [${requestId}] ICY: Metadata length indicator: ${data[icyMetaInt]} (${metaLength} bytes)`);
+      
       if (metaLength > 0 && data.length >= icyMetaInt + 1 + metaLength) {
         const metaData = new TextDecoder('latin1').decode(
           data.slice(icyMetaInt + 1, icyMetaInt + 1 + metaLength)
         );
+        console.log(`📊 [${requestId}] ICY: Raw metadata: "${metaData}"`);
         
         const titleMatch = metaData.match(/StreamTitle='([^']*?)'/);
         if (titleMatch && titleMatch[1]) {
+          const nowPlaying = titleMatch[1].trim();
+          console.log(`✅ [${requestId}] ICY: Found StreamTitle "${nowPlaying}"`);
           return {
-            nowPlaying: titleMatch[1].trim(),
+            nowPlaying: nowPlaying,
             source: 'icy'
           };
+        } else {
+          console.log(`⚪ [${requestId}] ICY: No StreamTitle found in metadata`);
         }
+      } else {
+        console.log(`⚪ [${requestId}] ICY: Insufficient data for metadata extraction`);
       }
+    } else {
+      console.log(`⚪ [${requestId}] ICY: Downloaded data too short for metadata extraction`);
     }
   } catch (error) {
-    console.error('ICY metadata failed:', error.message);
+    console.error(`❌ [${requestId}] ICY metadata failed:`, error.message);
   }
   
   return null;
@@ -496,6 +613,102 @@ async function fetchGenericMetadata(streamUrl, requestId) {
   return null;
 }
 
+// Inspect endpoint candidates and raw responses for a given stream URL
+app.get('/inspect', async (req, res) => {
+  const { url: streamUrl } = req.query;
+  const requestId = Math.random().toString(36).slice(2, 8);
+  if (!streamUrl) {
+    return res.status(400).json({ error: 'Missing required parameter: url' });
+  }
+
+  try {
+    const urlObj = new URL(streamUrl);
+    const hostBase = `${urlObj.protocol}//${urlObj.host}`;
+
+    const candidates = [];
+
+    // NTS
+    if (streamUrl.includes('nts')) {
+      candidates.push({ type: 'nts', url: 'https://www.nts.live/api/v2/live' });
+    }
+
+    // Airtime Pro
+    const airtimeMatch = urlObj.hostname.match(/^(.+)\.out\.airtime\.pro$/);
+    if (airtimeMatch) {
+      candidates.push({ type: 'airtimepro', url: `https://${airtimeMatch[1]}.airtime.pro/api/live-info-v2` });
+    }
+    const airtimeHints = [
+      ['cashmere', 'https://cashmereradio.airtime.pro/api/live-info-v2'],
+      ['kiosk', 'https://kioskradiobxl.airtime.pro/api/live-info-v2'],
+      ['dublabde', 'https://dublabde.airtime.pro/api/live-info-v2'],
+      ['radio80k', 'https://radio80k.airtime.pro/api/live-info-v2']
+    ];
+    for (const [key, url] of airtimeHints) {
+      if (streamUrl.toLowerCase().includes(key)) {
+        candidates.push({ type: 'airtimepro', url });
+      }
+    }
+
+    // Icecast status
+    const icecastStatus = [
+      `${hostBase}/status-json.xsl`,
+      `${hostBase}/status.json`,
+      `${hostBase}/stats.json`
+    ];
+    if (streamUrl.includes('callshopradio.com')) {
+      icecastStatus.unshift('https://icecast.callshopradio.com/status-json.xsl');
+    }
+    for (const url of icecastStatus) candidates.push({ type: 'icecast', url });
+
+    // Generic
+    const generic = [
+      `${hostBase}/api/nowplaying`,
+      `${hostBase}/nowplaying`,
+      `${hostBase}/current`,
+      `${hostBase}/metadata`,
+      `${hostBase}/info`,
+      `${hostBase}/playing.json`,
+      `${hostBase}/current.json`,
+      `${hostBase}/api/current`,
+      `${hostBase}/stats`,
+      `${hostBase}/7.html`
+    ];
+    for (const url of generic) candidates.push({ type: 'generic', url });
+
+    const results = [];
+    for (const c of candidates) {
+      try {
+        const r = await fetchWithTimeout(c.url, { cache: 'no-store' }, 3000);
+        const contentType = r.headers.get('content-type') || '';
+        const text = await r.text();
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        results.push({
+          type: c.type,
+          url: c.url,
+          status: r.status,
+          contentType,
+          snippet: text.slice(0, 500),
+          jsonKeys: json ? Object.keys(json) : null
+        });
+      } catch (e) {
+        results.push({ type: c.type, url: c.url, error: e.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      url: streamUrl,
+      inspected: results,
+      timestamp: new Date().toISOString(),
+      note: 'Use this to see which endpoints respond and how.'
+    });
+
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
@@ -510,4 +723,5 @@ app.listen(PORT, () => {
   console.log(`RadioDock Metadata Proxy running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/`);
   console.log(`Metadata API: http://localhost:${PORT}/metadata?url=STREAM_URL`);
+  console.log(`Inspect API:  http://localhost:${PORT}/inspect?url=STREAM_URL`);
 });
