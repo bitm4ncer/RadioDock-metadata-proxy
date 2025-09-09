@@ -168,6 +168,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+
 // Main metadata endpoint
 app.get('/v1/metadata', async (req, res) => {
   const fetchedAt = Date.now();
@@ -211,13 +212,21 @@ app.get('/v1/metadata', async (req, res) => {
   }
   
   try {
-    // Fetch metadata using strategies
-    const result = await fetchMetadata({
-      streamUrl,
-      stationId,
-      homepage,
-      country
+    // Add overall timeout for metadata fetching
+    const fetchTimeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('TIMEOUT')), 12000); // 12 second global timeout
     });
+    
+    // Fetch metadata using strategies with race condition
+    const result = await Promise.race([
+      fetchMetadata({
+        streamUrl,
+        stationId,
+        homepage,
+        country
+      }),
+      fetchTimeout
+    ]);
     
     const response = {
       ok: true,

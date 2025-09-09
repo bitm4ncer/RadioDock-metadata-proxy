@@ -24,9 +24,9 @@
 const { request } = require('undici');
 const icy = require('icy');
 
-// Timeout configuration
-const DEFAULT_TIMEOUT = 8000;
-const FAST_TIMEOUT = 3500;
+// Timeout configuration - reduced for better responsiveness
+const DEFAULT_TIMEOUT = 6000;
+const FAST_TIMEOUT = 2500;
 
 // Shared normalization for now playing strings
 function cleanNowPlaying(text) {
@@ -60,6 +60,8 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
     const response = await request(url, {
       ...options,
       signal: controller.signal,
+      followRedirects: true,
+      maxRedirections: 3,
       headers: {
         'User-Agent': 'RadioDock/1.0',
         'Cache-Control': 'no-store',
@@ -440,142 +442,153 @@ async function fetchIcecastMetadata(endpoints, mount) {
   }
 }
 
-// ICY metadata parsing with stream data extraction
+// ICY metadata parsing using the same logic as the working old version (adapted for Node.js)
 async function fetchICYMetadata(streamUrl) {
-  return new Promise((resolve) => {
-    let resolved = false;
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        resolve(null);
+  try {
+    console.log(`[ICY] Attempting to fetch metadata from: ${streamUrl}`);
+    
+    const response = await fetchWithTimeout(streamUrl, {
+      method: 'GET',
+      headers: {
+        'Icy-MetaData': '1',
+        'User-Agent': 'RadioDock/1.0'
       }
-    }, DEFAULT_TIMEOUT);
-
-    try {
-      const stream = icy.get(streamUrl, (res) => {
-        clearTimeout(timeout);
-        
-        // Set up metadata listener
-        res.on('metadata', (metadata) => {
-          try {
-            const parsed = icy.parse(metadata);
-            let nowPlaying = null;
-            
-            if (parsed.StreamTitle) {
-              nowPlaying = parsed.StreamTitle.trim();
-            } else if (parsed.StreamArtist && parsed.StreamTitle) {
-              nowPlaying = `${parsed.StreamArtist.trim()} - ${parsed.StreamTitle.trim()}`;
-            } else if (parsed.StreamArtist) {
-              nowPlaying = parsed.StreamArtist.trim();
-            }
-            
-            if (nowPlaying && nowPlaying.length > 3) {
-              const filtered = nowPlaying.toLowerCase();
-              const unwantedPatterns = [
-                'unknown', 'airtime!', 'live', 'on-air', 'radio', 'stream',
-                'broadcasting', 'music', 'live stream', 'internet radio',
-                'online radio', 'web radio', 'digital radio'
-              ];
-              
-              const isGeneric = unwantedPatterns.some(pattern => 
-                filtered === pattern || 
-                (filtered.length < 20 && filtered.includes(pattern))
-              );
-              
-              if (!isGeneric) {
-                stream.destroy();
-                if (!resolved) {
-                  resolved = true;
-                  resolve({
-                    source: 'icy',
-                    display: nowPlaying,
-                    artist: parsed.StreamArtist || null,
-                    title: parsed.StreamTitle || null,
-                    raw: parsed,
-                    confidence: 0.9,
-                    cacheTtl: 15
-                  });
-                }
-                return;
-              }
-            }
-            
-            // Fallback to headers
-            const icyName = res.headers['icy-name'];
-            const icyDescription = res.headers['icy-description'];
-            
-            if (icyName && icyName !== icyDescription) {
-              stream.destroy();
-              if (!resolved) {
-                resolved = true;
-                resolve({
-                  source: 'icy-headers',
-                  display: icyName,
-                  artist: null,
-                  title: null,
-                  raw: { headers: res.headers },
-                  confidence: 0.6,
-                  cacheTtl: 30
-                });
-              }
-              return;
-            }
-            
-            stream.destroy();
-            if (!resolved) {
-              resolved = true;
-              resolve(null);
-            }
-          } catch (error) {
-            stream.destroy();
-            if (!resolved) {
-              resolved = true;
-              resolve(null);
-            }
-          }
-        });
-        
-        res.on('error', () => {
-          stream.destroy();
-          if (!resolved) {
-            resolved = true;
-            resolve(null);
-          }
-        });
-        
-        // Read some data to trigger metadata
-        let dataReceived = false;
-        res.on('data', () => {
-          if (!dataReceived) {
-            dataReceived = true;
-            // Give it a moment to receive metadata
-            setTimeout(() => {
-              if (!resolved) {
-                resolved = true;
-                stream.destroy();
-                resolve(null);
-              }
-            }, 2000);
-          }
-        });
-      });
+    }, 8000);
+    
+    if (!response.ok) {
+      console.log(`[ICY] HTTP error: ${response.status}`);
+      throw new Error(`ICY fetch error: ${response.status}`);
+    }
+    
+    const icyMetaInt = parseInt(response.headers['icy-metaint']);
+    console.log(`[ICY] icy-metaint: ${icyMetaInt}, has body: ${!!response.body}`);
+    
+    if (!icyMetaInt || !response.body) {
+      // Fallback to headers if no metadata blocks
+      const icyName = response.headers['icy-name'];
+      const icyDescription = response.headers['icy-description'];
       
-      stream.on('error', () => {
-        clearTimeout(timeout);
-        if (!resolved) {
-          resolved = true;
-          resolve(null);
+      console.log(`[ICY] No metadata blocks, trying headers - name: "${icyName}", desc: "${icyDescription}"`);
+      
+      if (icyName && icyName !== icyDescription) {
+        const filtered = icyName.toLowerCase();
+        const unwantedPatterns = ['unknown', 'untitled', 'live', 'stream', 'radio'];
+        const isGeneric = unwantedPatterns.some(pattern => 
+          filtered === pattern || (filtered.length < 15 && filtered.includes(pattern))
+        );
+        
+        if (!isGeneric && icyName.length > 3) {
+          return {
+            source: 'icy-headers',
+            display: cleanNowPlaying(icyName),
+            artist: null,
+            title: null,
+            raw: { icyName, icyDescription },
+            confidence: 0.7,
+            cacheTtl: 30
+          };
         }
-      });
+      }
+      throw new Error('No ICY metadata available');
+    }
+    
+    // Read the stream to extract metadata blocks (adapted for Node.js undici)
+    let buffer = new Uint8Array();
+    let bytesRead = 0;
+    let metadataFound = null;
+    
+    console.log(`[ICY] Reading stream data to find metadata at byte ${icyMetaInt}...`);
+    
+    try {
+      // Use undici body iterator for Node.js
+      for await (const chunk of response.body) {
+        // Convert chunk to Uint8Array if needed
+        const chunkArray = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        
+        // Append new data to buffer
+        const newBuffer = new Uint8Array(buffer.length + chunkArray.length);
+        newBuffer.set(buffer);
+        newBuffer.set(chunkArray, buffer.length);
+        buffer = newBuffer;
+        bytesRead += chunkArray.length;
+        
+        // Check if we have reached the metadata block
+        if (buffer.length >= icyMetaInt + 1) {
+          const metadataLength = buffer[icyMetaInt] * 16;
+          console.log(`[ICY] Found metadata length byte: ${buffer[icyMetaInt]} (${metadataLength} bytes)`);
+          
+          if (metadataLength > 0 && buffer.length >= icyMetaInt + 1 + metadataLength) {
+            // Extract metadata block
+            const metadataBytes = buffer.slice(icyMetaInt + 1, icyMetaInt + 1 + metadataLength);
+            const metadataString = new TextDecoder().decode(metadataBytes).replace(/\0/g, '');
+            console.log(`[ICY] Raw metadata string: "${metadataString}"`);
+            
+            // Parse StreamTitle from metadata
+            const streamTitleMatch = metadataString.match(/StreamTitle='([^']*)'/);
+            if (streamTitleMatch && streamTitleMatch[1]) {
+              metadataFound = streamTitleMatch[1].trim();
+              console.log(`[ICY] Extracted StreamTitle: "${metadataFound}"`);
+              break; // Found metadata, exit loop
+            }
+          }
+        }
+        
+        // Stop reading after getting enough data
+        if (bytesRead >= icyMetaInt + 255) {
+          break;
+        }
+      }
+    } catch (streamError) {
+      console.log(`[ICY] Stream reading error: ${streamError.message}`);
+    }
+    
+    // Filter out generic/unhelpful metadata (same logic as old version)
+    if (metadataFound && metadataFound.length > 0) {
+      const filtered = metadataFound.toLowerCase();
+      const unwantedPatterns = [
+        'unknown', 'airtime!', 'live', 'on-air', 'radio', 'stream',
+        'broadcasting', 'music', 'live stream', 'internet radio',
+        'online radio', 'web radio', 'digital radio'
+      ];
       
-    } catch (error) {
-      clearTimeout(timeout);
-      if (!resolved) {
-        resolved = true;
-        resolve(null);
+      const isGeneric = unwantedPatterns.some(pattern => 
+        filtered === pattern || 
+        (filtered.length < 20 && filtered.includes(pattern))
+      );
+      
+      if (!isGeneric && metadataFound.length > 3) {
+        // Try to split artist and title
+        let artist = null;
+        let title = null;
+        
+        if (metadataFound.includes(' - ')) {
+          const parts = metadataFound.split(' - ');
+          artist = parts[0].trim();
+          title = parts.slice(1).join(' - ').trim();
+        }
+        
+        return {
+          source: 'icy',
+          display: cleanNowPlaying(metadataFound),
+          artist: artist,
+          title: title,
+          raw: { StreamTitle: metadataFound },
+          confidence: 0.95,
+          cacheTtl: 15
+        };
       }
     }
-  });
+    
+    console.log(`[ICY] No useful metadata found`);
+    return null;
+    
+  } catch (error) {
+    // Only log significant errors, not common network issues
+    if (error.name !== 'AbortError' && !error.message.includes('NetworkError')) {
+      console.log(`[ICY] ICY metadata fetch failed:`, error.message);
+    }
+    return null;
+  }
 }
 
 // Generic metadata fetcher for various station APIs
@@ -803,6 +816,14 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
   
   try {
     // Strategy selection based on hostname/URL patterns
+    
+    // German public broadcasters (WDR, ARD)
+    if (streamUrl.includes('wdr') || streamUrl.includes('rndfnk.com') || 
+        streamUrl.includes('1live') || streamUrl.includes('wdr2') ||
+        streamUrl.includes('wdr3') || streamUrl.includes('wdr4') || streamUrl.includes('wdr5')) {
+      strategies.push(() => fetchWDRMetadata(streamUrl, station));
+    }
+    
     if (streamUrl.includes('stream-relay-geo.ntslive.net')) {
       strategies.push(() => fetchNTSMetadata(streamUrl, stationId));
     }
@@ -840,10 +861,13 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
     // Station info fallback
     strategies.push(() => fetchStationInfoFallback(station));
     
-    // Execute strategies concurrently
+    // Execute strategies concurrently with individual timeouts
     const promises = strategies.map(strategy => 
-      strategy().catch(err => {
-        console.error('Strategy failed:', err);
+      Promise.race([
+        strategy(),
+        new Promise(resolve => setTimeout(() => resolve(null), 5000)) // 5s per strategy
+      ]).catch(err => {
+        console.error('Strategy failed:', err.message || err);
         return null;
       })
     );
@@ -873,6 +897,96 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
       reason: 'upstream-error'
     };
   }
+}
+
+// WDR/ARD German Public Broadcaster metadata
+async function fetchWDRMetadata(streamUrl, station) {
+  try {
+    console.log(`[WDR] Attempting to fetch metadata for German public broadcaster stream`);
+    
+    // Try to determine the service from the URL
+    let service = null;
+    if (streamUrl.includes('1live')) {
+      service = '1live';
+    } else if (streamUrl.includes('wdr2')) {
+      service = 'wdr2';
+    } else if (streamUrl.includes('wdr3')) {
+      service = 'wdr3';
+    } else if (streamUrl.includes('wdr4')) {
+      service = 'wdr4';
+    } else if (streamUrl.includes('wdr5')) {
+      service = 'wdr5';
+    }
+    
+    if (!service) {
+      console.log(`[WDR] Could not determine service from URL: ${streamUrl}`);
+      return null;
+    }
+    
+    // Try WDR's live API endpoint
+    const apiUrl = `https://www1.wdr.de/radio/player/live/livesender-${service}-100.json`;
+    console.log(`[WDR] Trying API endpoint: ${apiUrl}`);
+    
+    const response = await fetchWithTimeout(apiUrl, {}, 5000);
+    if (!response.ok) {
+      console.log(`[WDR] API endpoint failed: ${response.statusCode}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    console.log(`[WDR] API response:`, data);
+    
+    // Parse WDR API response
+    if (data && data.liveStreamData && data.liveStreamData.currentBroadcast) {
+      const broadcast = data.liveStreamData.currentBroadcast;
+      let nowPlaying = '';
+      
+      if (broadcast.title) {
+        nowPlaying = broadcast.title;
+        
+        // Add subtitle if available
+        if (broadcast.subtitle && broadcast.subtitle !== broadcast.title) {
+          nowPlaying += ` - ${broadcast.subtitle}`;
+        }
+      }
+      
+      if (nowPlaying) {
+        return {
+          source: 'wdr-api',
+          display: cleanNowPlaying(nowPlaying),
+          artist: null,
+          title: broadcast.title,
+          raw: broadcast,
+          confidence: 0.9,
+          cacheTtl: 60 // Cache for 1 minute
+        };
+      }
+    }
+    
+    // Fallback: Try to get current track info
+    if (data && data.liveStreamData && data.liveStreamData.currentTrack) {
+      const track = data.liveStreamData.currentTrack;
+      let artist = track.artist || '';
+      let title = track.title || '';
+      
+      if (artist && title) {
+        return {
+          source: 'wdr-api',
+          display: `${artist} - ${title}`,
+          artist: artist,
+          title: title,
+          raw: track,
+          confidence: 0.95,
+          cacheTtl: 30 // Cache for 30 seconds
+        };
+      }
+    }
+    
+  } catch (error) {
+    console.log(`[WDR] API fetch failed:`, error.message);
+  }
+  
+  return null;
 }
 
 module.exports = {
