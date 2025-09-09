@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "RadioDock",
+  "version": "1.0",
+  "description": "Play and organize your favorite radio stations. Explore 50,000+ stations including community radios and save them into custom lists.",
+  "icons": {
+    "16": "logo/icon-16.png",
+    "48": "logo/icon-48.png",
+    "128": "logo/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "RadioDock",
+    "default_icon": {
+      "16": "logo/icon-16.png",
+      "48": "logo/icon-48.png",
+      "128": "logo/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage",
+    "offscreen",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://*.radio-browser.info/*",
+    "https://your-service-name.onrender.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src * data:; font-src * data:;"
+  }
+}

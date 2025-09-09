@@ -1,0 +1,26 @@
+{
+  "name": "radio-metadata-proxy",
+  "version": "1.0.0",
+  "description": "Metadata proxy service for RadioDock extension",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "radio",
+    "metadata",
+    "icecast",
+    "proxy"
+  ],
+  "author": "RadioDock",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

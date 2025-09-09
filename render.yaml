@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: radio-metadata-proxy
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+    healthCheckPath: /
