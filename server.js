@@ -2,11 +2,16 @@ const express = require('express');
 const cors = require('cors');
 const pino = require('pino');
 const { LRUCache } = require('lru-cache');
+const { request } = require('undici');
 const { fetchMetadata } = require('./strategies/index.js');
 
 const app = express();
 const port = process.env.PORT || 3000;
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+// Timeout configuration
+const DEFAULT_TIMEOUT = 6000;
+const FAST_TIMEOUT = 2500;
 
 // LRU cache for metadata responses
 const cache = new LRUCache({
@@ -151,6 +156,106 @@ function validateMetadataRequest(query) {
   return { valid: true };
 }
 
+// Input validation helper for playlist requests
+function validatePlaylistRequest(query) {
+  const { action, url } = query;
+  
+  // Validate action parameter
+  if (!action || typeof action !== 'string') {
+    return { valid: false, error: 'Missing or invalid action parameter' };
+  }
+  
+  if (action !== 'fetch_m3u') {
+    return { valid: false, error: 'Invalid action (only fetch_m3u supported)' };
+  }
+  
+  // Validate URL parameter
+  if (!url || typeof url !== 'string') {
+    return { valid: false, error: 'Missing or invalid playlist URL' };
+  }
+  
+  if (url.length > 2000) {
+    return { valid: false, error: 'Playlist URL too long' };
+  }
+  
+  try {
+    const parsedUrl = new URL(url);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      return { valid: false, error: 'Invalid URL scheme (only http/https allowed)' };
+    }
+    
+    // Additional validation for M3U files
+    if (!url.toLowerCase().includes('.m3u')) {
+      return { valid: false, error: 'URL does not appear to be an M3U playlist' };
+    }
+  } catch (e) {
+    return { valid: false, error: 'Invalid URL format' };
+  }
+  
+  return { valid: true };
+}
+
+// M3U playlist fetching and parsing utility
+async function fetchAndParseM3U(url) {
+  
+  try {
+    // Fetch the M3U playlist with timeout
+    const { statusCode, body } = await request(url, {
+      method: 'GET',
+      headersTimeout: DEFAULT_TIMEOUT,
+      bodyTimeout: DEFAULT_TIMEOUT,
+      headers: {
+        'User-Agent': 'RadioDock-Proxy/1.0'
+      }
+    });
+    
+    if (statusCode !== 200) {
+      throw new Error(`HTTP ${statusCode}: Failed to fetch playlist`);
+    }
+    
+    // Read the response body
+    const text = await body.text();
+    
+    if (!text || text.trim().length === 0) {
+      throw new Error('Empty playlist file');
+    }
+    
+    // Parse M3U playlist
+    const lines = text.split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#')); // Filter out comments and empty lines
+    
+    if (lines.length === 0) {
+      throw new Error('No stream URLs found in playlist');
+    }
+    
+    // Get the first valid URL
+    let streamUrl = lines[0];
+    
+    // If it's a relative URL, make it absolute
+    if (streamUrl && !streamUrl.includes('://')) {
+      const baseUrl = new URL(url);
+      if (streamUrl.startsWith('/')) {
+        streamUrl = `${baseUrl.protocol}//${baseUrl.host}${streamUrl}`;
+      } else {
+        const basePath = baseUrl.pathname.substring(0, baseUrl.pathname.lastIndexOf('/') + 1);
+        streamUrl = `${baseUrl.protocol}//${baseUrl.host}${basePath}${streamUrl}`;
+      }
+    }
+    
+    // Validate the resolved URL
+    if (!streamUrl || !streamUrl.includes('://')) {
+      throw new Error('Invalid stream URL in playlist');
+    }
+    
+    return streamUrl;
+    
+  } catch (error) {
+    logger.error({ url, error: error.message }, 'M3U playlist fetch failed');
+    throw error;
+  }
+}
+
 // Root endpoint - redirect to health check
 app.get('/', (req, res) => {
   res.json({ 
@@ -158,7 +263,8 @@ app.get('/', (req, res) => {
     status: 'ok',
     endpoints: {
       health: '/health',
-      metadata: '/v1/metadata'
+      metadata: '/v1/metadata',
+      playlist: '/v1/playlist'
     }
   });
 });
@@ -273,6 +379,82 @@ app.get('/v1/metadata', async (req, res) => {
   }
 });
 
+// M3U Playlist resolution endpoint
+app.get('/v1/playlist', async (req, res) => {
+  const fetchedAt = Date.now();
+  const { action, url: playlistUrl } = req.query;
+  
+  // Input validation
+  const validation = validatePlaylistRequest(req.query);
+  if (!validation.valid) {
+    return res.json({
+      success: false,
+      error: validation.error,
+      fetchedAt,
+      cacheTtl: 10
+    });
+  }
+  
+  // Create cache key for M3U playlist
+  const cacheKey = `m3u:${playlistUrl}`;
+  
+  // Check cache first (short TTL for playlists as they can change)
+  if (cache.has(cacheKey)) {
+    const cachedResponse = cache.get(cacheKey);
+    logger.info({ playlistUrl, cached: true }, 'M3U playlist cache hit');
+    return res.json({
+      ...cachedResponse,
+      cached: true
+    });
+  }
+  
+  try {
+    logger.info({ action, playlistUrl }, 'Fetching M3U playlist');
+    
+    // Fetch and parse the M3U playlist
+    const streamUrl = await fetchAndParseM3U(playlistUrl);
+    
+    const response = {
+      success: true,
+      streamUrl,
+      fetchedAt,
+      cached: false,
+      cacheTtl: 60 // Cache for 1 minute (playlists can change)
+    };
+    
+    // Cache the response with short TTL
+    cache.set(cacheKey, {
+      success: true,
+      streamUrl,
+      fetchedAt
+    }, { ttl: 60 * 1000 }); // 1 minute TTL
+    
+    logger.info({ 
+      playlistUrl,
+      streamUrl,
+      cached: false
+    }, 'M3U playlist resolved successfully');
+    
+    res.json(response);
+    
+  } catch (error) {
+    logger.error({ 
+      error: error.message, 
+      playlistUrl, 
+      stack: error.stack 
+    }, 'M3U playlist resolution failed');
+    
+    const errorResponse = {
+      success: false,
+      error: error.message || 'Failed to resolve M3U playlist',
+      fetchedAt,
+      cacheTtl: 30 // Short cache for errors
+    };
+    
+    res.json(errorResponse);
+  }
+});
+
 // Global error handler
 app.use((err, req, res, next) => {
   logger.error({ error: err.message, stack: err.stack }, 'Unhandled error');
@@ -305,7 +487,7 @@ app.listen(port, '0.0.0.0', () => {
   logger.info({ 
     port, 
     env: process.env.NODE_ENV || 'development',
-    endpoints: ['/', '/health', '/v1/metadata']
+    endpoints: ['/', '/health', '/v1/metadata', '/v1/playlist']
   }, 'RadioDock metadata proxy server started');
 });
 
