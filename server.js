@@ -165,8 +165,8 @@ function validatePlaylistRequest(query) {
     return { valid: false, error: 'Missing or invalid action parameter' };
   }
   
-  if (action !== 'fetch_m3u') {
-    return { valid: false, error: 'Invalid action (only fetch_m3u supported)' };
+  if (!['fetch_m3u', 'fetch_playlist'].includes(action)) {
+    return { valid: false, error: 'Invalid action (only fetch_m3u and fetch_playlist supported)' };
   }
   
   // Validate URL parameter
@@ -184,9 +184,16 @@ function validatePlaylistRequest(query) {
       return { valid: false, error: 'Invalid URL scheme (only http/https allowed)' };
     }
     
-    // Additional validation for M3U files
-    if (!url.toLowerCase().includes('.m3u')) {
+    // Additional validation for playlist files
+    const isM3U = url.toLowerCase().includes('.m3u');
+    const isPLS = url.toLowerCase().includes('.pls');
+    
+    if (action === 'fetch_m3u' && !isM3U) {
       return { valid: false, error: 'URL does not appear to be an M3U playlist' };
+    }
+    
+    if (action === 'fetch_playlist' && !(isM3U || isPLS)) {
+      return { valid: false, error: 'URL does not appear to be a supported playlist format' };
     }
   } catch (e) {
     return { valid: false, error: 'Invalid URL format' };
@@ -248,11 +255,88 @@ async function fetchAndParseM3U(url) {
       throw new Error('Invalid stream URL in playlist');
     }
     
+    // Check if the resolved URL is another M3U file (nested playlist)
+    if (streamUrl.toLowerCase().includes('.m3u')) {
+      throw new Error(`Nested M3U playlist detected: ${streamUrl} - not supported`);
+    }
+    
     return streamUrl;
     
   } catch (error) {
     logger.error({ url, error: error.message }, 'M3U playlist fetch failed');
     throw error;
+  }
+}
+
+// PLS playlist fetching and parsing utility
+async function fetchAndParsePLS(url) {
+  try {
+    // Fetch the PLS playlist with timeout
+    const { statusCode, body } = await request(url, {
+      method: 'GET',
+      headersTimeout: DEFAULT_TIMEOUT,
+      bodyTimeout: DEFAULT_TIMEOUT,
+      headers: {
+        'User-Agent': 'RadioDock-Proxy/1.0'
+      }
+    });
+    
+    if (statusCode !== 200) {
+      throw new Error(`HTTP ${statusCode}: Failed to fetch playlist`);
+    }
+    
+    // Read the response body
+    const text = await body.text();
+    
+    if (!text || text.trim().length === 0) {
+      throw new Error('Empty playlist file');
+    }
+    
+    // Parse PLS playlist
+    const lines = text.split('\n').map(line => line.trim());
+    const urls = [];
+    
+    // Look for File1=, File2=, etc. entries
+    for (const line of lines) {
+      if (line.startsWith('File') && line.includes('=')) {
+        const urlPart = line.substring(line.indexOf('=') + 1);
+        if (urlPart && urlPart.includes('://')) {
+          urls.push(urlPart);
+        }
+      }
+    }
+    
+    if (urls.length === 0) {
+      throw new Error('No stream URLs found in PLS playlist');
+    }
+    
+    // Return the first URL (usually the primary stream)
+    const streamUrl = urls[0];
+    
+    // Check if the resolved URL is another playlist file (nested playlist)
+    if (streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('.pls')) {
+      throw new Error(`Nested playlist detected: ${streamUrl} - not supported`);
+    }
+    
+    return streamUrl;
+    
+  } catch (error) {
+    logger.error({ url, error: error.message }, 'PLS playlist fetch failed');
+    throw error;
+  }
+}
+
+// Generic playlist fetching and parsing utility
+async function fetchAndParsePlaylist(url) {
+  const isM3U = url.toLowerCase().includes('.m3u') && !url.toLowerCase().includes('.m3u8');
+  const isPLS = url.toLowerCase().includes('.pls');
+  
+  if (isM3U) {
+    return await fetchAndParseM3U(url);
+  } else if (isPLS) {
+    return await fetchAndParsePLS(url);
+  } else {
+    throw new Error('Unsupported playlist format');
   }
 }
 
@@ -379,7 +463,7 @@ app.get('/v1/metadata', async (req, res) => {
   }
 });
 
-// M3U Playlist resolution endpoint
+// Playlist resolution endpoint (M3U/PLS)
 app.get('/v1/playlist', async (req, res) => {
   const fetchedAt = Date.now();
   const { action, url: playlistUrl } = req.query;
@@ -395,13 +479,13 @@ app.get('/v1/playlist', async (req, res) => {
     });
   }
   
-  // Create cache key for M3U playlist
-  const cacheKey = `m3u:${playlistUrl}`;
+  // Create cache key for playlist
+  const cacheKey = `playlist:${playlistUrl}`;
   
   // Check cache first (short TTL for playlists as they can change)
   if (cache.has(cacheKey)) {
     const cachedResponse = cache.get(cacheKey);
-    logger.info({ playlistUrl, cached: true }, 'M3U playlist cache hit');
+    logger.info({ playlistUrl, cached: true }, 'Playlist cache hit');
     return res.json({
       ...cachedResponse,
       cached: true
@@ -409,10 +493,10 @@ app.get('/v1/playlist', async (req, res) => {
   }
   
   try {
-    logger.info({ action, playlistUrl }, 'Fetching M3U playlist');
+    logger.info({ action, playlistUrl }, 'Fetching playlist');
     
-    // Fetch and parse the M3U playlist
-    const streamUrl = await fetchAndParseM3U(playlistUrl);
+    // Fetch and parse the playlist (supports M3U and PLS)
+    const streamUrl = await fetchAndParsePlaylist(playlistUrl);
     
     const response = {
       success: true,
@@ -433,7 +517,7 @@ app.get('/v1/playlist', async (req, res) => {
       playlistUrl,
       streamUrl,
       cached: false
-    }, 'M3U playlist resolved successfully');
+    }, 'Playlist resolved successfully');
     
     res.json(response);
     
@@ -442,11 +526,11 @@ app.get('/v1/playlist', async (req, res) => {
       error: error.message, 
       playlistUrl, 
       stack: error.stack 
-    }, 'M3U playlist resolution failed');
+    }, 'Playlist resolution failed');
     
     const errorResponse = {
       success: false,
-      error: error.message || 'Failed to resolve M3U playlist',
+      error: error.message || 'Failed to resolve playlist',
       fetchedAt,
       cacheTtl: 30 // Short cache for errors
     };
