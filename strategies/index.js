@@ -633,9 +633,13 @@ async function fetchGenericMetadata(streamUrl, station) {
     
     // Special handling for Radio King streams
     if (streamUrl.includes('radioking.com')) {
+      console.log(`[Radio King] Attempting API metadata for stream: ${streamUrl}`);
+      
       const radioIdMatch = streamUrl.match(/radio\/(\d+)/);
       if (radioIdMatch) {
         const radioId = radioIdMatch[1];
+        console.log(`[Radio King] Extracted radio ID: ${radioId}`);
+        
         const radioKingEndpoints = [
           `https://www.radioking.com/api/radio/${radioId}/track/current`,
           `https://api.radioking.com/widget/radio/${radioId}`,
@@ -643,19 +647,29 @@ async function fetchGenericMetadata(streamUrl, station) {
           `${urlObj.protocol}//${urlObj.host}/api/radio/${radioId}/track/current`
         ];
         
+        console.log(`[Radio King] Testing ${radioKingEndpoints.length} API endpoints...`);
+        
         for (const endpoint of radioKingEndpoints) {
+          console.log(`[Radio King] Trying endpoint: ${endpoint}`);
+          
           try {
             const response = await fetchWithTimeout(endpoint, {}, 3000);
+            console.log(`[Radio King] Response status: ${response.status} ${response.statusText}`);
             
             if (response.ok) {
               const data = await response.json();
+              console.log(`[Radio King] Response data:`, JSON.stringify(data, null, 2));
+              
               const parsed = parseArtistTitle(
                 data.title || data.track?.title || data.track?.name || '',
                 data.artist || data.track?.artist || '',
                 data.title || data.track?.title || data.track?.name || ''
               );
               
+              console.log(`[Radio King] Parsed metadata: "${parsed}"`);
+              
               if (parsed && isValidMetadata({ display: parsed })) {
+                console.log(`[Radio King] ✅ Valid metadata found from API: "${parsed}"`);
                 return {
                   source: 'radioking',
                   display: parsed,
@@ -665,12 +679,21 @@ async function fetchGenericMetadata(streamUrl, station) {
                   confidence: 0.8,
                   cacheTtl: 15
                 };
+              } else {
+                console.log(`[Radio King] ❌ Invalid metadata, continuing to next endpoint`);
               }
+            } else {
+              console.log(`[Radio King] ❌ HTTP error: ${response.status}`);
             }
           } catch (e) {
+            console.log(`[Radio King] ❌ Request failed: ${e.message}`);
             continue;
           }
         }
+        
+        console.log(`[Radio King] ❌ All API endpoints failed, falling back to ICY metadata`);
+      } else {
+        console.log(`[Radio King] ❌ Could not extract radio ID from URL`);
       }
     }
     
