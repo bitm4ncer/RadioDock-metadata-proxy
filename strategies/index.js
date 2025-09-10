@@ -881,8 +881,8 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
       strategies.push(() => fetchRadioBrowserMetadata(station));
     }
     
-    // Station info fallback
-    strategies.push(() => fetchStationInfoFallback(station));
+    // Station info fallback disabled - better to show nothing than redundant station name
+    // strategies.push(() => fetchStationInfoFallback(station));
     
     // Execute strategies concurrently with individual timeouts
     const promises = strategies.map(strategy => 
