@@ -445,7 +445,6 @@ async function fetchIcecastMetadata(endpoints, mount) {
 // ICY metadata parsing using the same logic as the working old version (adapted for Node.js)
 async function fetchICYMetadata(streamUrl) {
   try {
-    console.log(`[ICY] Attempting to fetch metadata from: ${streamUrl}`);
     
     const response = await fetchWithTimeout(streamUrl, {
       method: 'GET',
@@ -456,19 +455,16 @@ async function fetchICYMetadata(streamUrl) {
     }, 8000);
     
     if (!response.ok) {
-      console.log(`[ICY] HTTP error: ${response.status}`);
       throw new Error(`ICY fetch error: ${response.status}`);
     }
     
     const icyMetaInt = parseInt(response.headers['icy-metaint']);
-    console.log(`[ICY] icy-metaint: ${icyMetaInt}, has body: ${!!response.body}`);
     
     if (!icyMetaInt || !response.body) {
       // Fallback to headers if no metadata blocks
       const icyName = response.headers['icy-name'];
       const icyDescription = response.headers['icy-description'];
       
-      console.log(`[ICY] No metadata blocks, trying headers - name: "${icyName}", desc: "${icyDescription}"`);
       
       if (icyName && icyName !== icyDescription) {
         const filtered = icyName.toLowerCase();
@@ -497,7 +493,6 @@ async function fetchICYMetadata(streamUrl) {
     let bytesRead = 0;
     let metadataFound = null;
     
-    console.log(`[ICY] Reading stream data to find metadata at byte ${icyMetaInt}...`);
     
     try {
       // Use undici body iterator for Node.js
@@ -515,19 +510,16 @@ async function fetchICYMetadata(streamUrl) {
         // Check if we have reached the metadata block
         if (buffer.length >= icyMetaInt + 1) {
           const metadataLength = buffer[icyMetaInt] * 16;
-          console.log(`[ICY] Found metadata length byte: ${buffer[icyMetaInt]} (${metadataLength} bytes)`);
           
           if (metadataLength > 0 && buffer.length >= icyMetaInt + 1 + metadataLength) {
             // Extract metadata block
             const metadataBytes = buffer.slice(icyMetaInt + 1, icyMetaInt + 1 + metadataLength);
             const metadataString = new TextDecoder().decode(metadataBytes).replace(/\0/g, '');
-            console.log(`[ICY] Raw metadata string: "${metadataString}"`);
             
             // Parse StreamTitle from metadata
             const streamTitleMatch = metadataString.match(/StreamTitle='([^']*)'/);
             if (streamTitleMatch && streamTitleMatch[1]) {
               metadataFound = streamTitleMatch[1].trim();
-              console.log(`[ICY] Extracted StreamTitle: "${metadataFound}"`);
               break; // Found metadata, exit loop
             }
           }
@@ -539,7 +531,6 @@ async function fetchICYMetadata(streamUrl) {
         }
       }
     } catch (streamError) {
-      console.log(`[ICY] Stream reading error: ${streamError.message}`);
     }
     
     // Filter out generic/unhelpful metadata (same logic as old version)
@@ -579,13 +570,11 @@ async function fetchICYMetadata(streamUrl) {
       }
     }
     
-    console.log(`[ICY] No useful metadata found`);
     return null;
     
   } catch (error) {
     // Only log significant errors, not common network issues
     if (error.name !== 'AbortError' && !error.message.includes('NetworkError')) {
-      console.log(`[ICY] ICY metadata fetch failed:`, error.message);
     }
     return null;
   }
@@ -633,12 +622,10 @@ async function fetchGenericMetadata(streamUrl, station) {
     
     // Special handling for Radio King streams
     if (streamUrl.includes('radioking.com')) {
-      console.log(`[Radio King] Attempting API metadata for stream: ${streamUrl}`);
       
       const radioIdMatch = streamUrl.match(/radio\/(\d+)/);
       if (radioIdMatch) {
         const radioId = radioIdMatch[1];
-        console.log(`[Radio King] Extracted radio ID: ${radioId}`);
         
         const radioKingEndpoints = [
           `https://www.radioking.com/api/radio/${radioId}/track/current`,
@@ -647,18 +634,14 @@ async function fetchGenericMetadata(streamUrl, station) {
           `${urlObj.protocol}//${urlObj.host}/api/radio/${radioId}/track/current`
         ];
         
-        console.log(`[Radio King] Testing ${radioKingEndpoints.length} API endpoints...`);
         
         for (const endpoint of radioKingEndpoints) {
-          console.log(`[Radio King] Trying endpoint: ${endpoint}`);
           
           try {
             const response = await fetchWithTimeout(endpoint, {}, 3000);
-            console.log(`[Radio King] Response status: ${response.status} ${response.statusText}`);
             
             if (response.ok) {
               const data = await response.json();
-              console.log(`[Radio King] Response data:`, JSON.stringify(data, null, 2));
               
               const parsed = parseArtistTitle(
                 data.title || data.track?.title || data.track?.name || '',
@@ -666,10 +649,8 @@ async function fetchGenericMetadata(streamUrl, station) {
                 data.title || data.track?.title || data.track?.name || ''
               );
               
-              console.log(`[Radio King] Parsed metadata: "${parsed}"`);
               
               if (parsed && isValidMetadata({ display: parsed })) {
-                console.log(`[Radio King] ✅ Valid metadata found from API: "${parsed}"`);
                 return {
                   source: 'radioking',
                   display: parsed,
@@ -680,20 +661,15 @@ async function fetchGenericMetadata(streamUrl, station) {
                   cacheTtl: 15
                 };
               } else {
-                console.log(`[Radio King] ❌ Invalid metadata, continuing to next endpoint`);
               }
             } else {
-              console.log(`[Radio King] ❌ HTTP error: ${response.status}`);
             }
           } catch (e) {
-            console.log(`[Radio King] ❌ Request failed: ${e.message}`);
             continue;
           }
         }
         
-        console.log(`[Radio King] ❌ All API endpoints failed, falling back to ICY metadata`);
       } else {
-        console.log(`[Radio King] ❌ Could not extract radio ID from URL`);
       }
     }
     
@@ -925,7 +901,6 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
 // WDR/ARD German Public Broadcaster metadata
 async function fetchWDRMetadata(streamUrl, station) {
   try {
-    console.log(`[WDR] Attempting to fetch metadata for German public broadcaster stream`);
     
     // Try to determine the service from the URL
     let service = null;
@@ -942,22 +917,18 @@ async function fetchWDRMetadata(streamUrl, station) {
     }
     
     if (!service) {
-      console.log(`[WDR] Could not determine service from URL: ${streamUrl}`);
       return null;
     }
     
     // Try WDR's live API endpoint
     const apiUrl = `https://www1.wdr.de/radio/player/live/livesender-${service}-100.json`;
-    console.log(`[WDR] Trying API endpoint: ${apiUrl}`);
     
     const response = await fetchWithTimeout(apiUrl, {}, 5000);
     if (!response.ok) {
-      console.log(`[WDR] API endpoint failed: ${response.statusCode}`);
       return null;
     }
     
     const data = await response.json();
-    console.log(`[WDR] API response:`, data);
     
     // Parse WDR API response
     if (data && data.liveStreamData && data.liveStreamData.currentBroadcast) {
@@ -1006,7 +977,6 @@ async function fetchWDRMetadata(streamUrl, station) {
     }
     
   } catch (error) {
-    console.log(`[WDR] API fetch failed:`, error.message);
   }
   
   return null;
