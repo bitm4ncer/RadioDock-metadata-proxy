@@ -67,12 +67,21 @@ setInterval(() => {
 // CORS configuration
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests from Chrome extension origins
+    // Allow requests from the Chrome extension, the radiodock.app PWA,
+    // and local development origins.
     const allowedOrigins = [
       /^chrome-extension:\/\/.*$/,
       /^moz-extension:\/\/.*$/,
-      'http://localhost:3000', // development
-      'http://127.0.0.1:3000'  // development
+      'https://radiodock.app',
+      'https://www.radiodock.app',
+      /^https:\/\/.+\.radiodock\.app$/,        // future subdomains (staging etc.)
+      /^https:\/\/.+--radiodock-app\.netlify\.app$/, // optional preview previews
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      /^http:\/\/localhost:\d+$/,              // any localhost port (Vite auto-port)
+      /^http:\/\/127\.0\.0\.1:\d+$/,
     ];
     
     // Allow no origin for non-browser requests

@@ -1,0 +1,36 @@
+name: Keep Render warm
+
+# Render's free tier spins down the service after ~15 minutes of inactivity.
+# A cold start adds 15-30 seconds to the first user request, during which the
+# RadioDock client only sees "Loading...". This workflow pings /health every
+# 10 minutes so the dyno stays warm 24/7.
+#
+# 10 min interval gives ~5 min safety margin against GitHub Actions cron
+# best-effort lag. Total monthly compute (~720h continuous) fits inside the
+# Render Free Tier 750h/month ceiling.
+#
+# If Render's policy changes or traffic grows, the next step is to upgrade to
+# Render Starter ($7/mo) and delete this workflow.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /health
+        run: |
+          set +e
+          response=$(curl -fsS -m 60 -w "\n%{http_code} %{time_total}s" \
+            https://radiodock-metadata-proxy-1.onrender.com/health)
+          echo "$response"
+          # Don't fail the workflow on a single bad ping — Render cold starts
+          # can exceed curl's timeout. The next scheduled run will retry.
+          exit 0

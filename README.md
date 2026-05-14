@@ -1,6 +1,21 @@
 # RadioDock Metadata Proxy
 
-A production-ready metadata proxy server that handles "Now Playing" data fetching for the RadioDock Chrome extension. This proxy enables the extension to restrict its host permissions while maintaining full metadata functionality for all supported radio stations.
+A production-ready metadata proxy server that handles "Now Playing" data fetching for both the [RadioDock Chrome extension](https://github.com/bitm4ncer/RadioDock) and the [RadioDock PWA at radiodock.app](https://github.com/bitm4ncer/radiodock.app). This proxy enables clients to fetch metadata from streams that don't expose CORS headers, parse ICY metadata that browsers cannot read directly, and aggregate multiple upstream strategies behind a single endpoint.
+
+## Allowed origins (CORS)
+
+- `chrome-extension://*` — the RadioDock extension
+- `moz-extension://*` — Firefox port (if used)
+- `https://radiodock.app` and `https://www.radiodock.app` — the PWA
+- `http://localhost:*`, `http://127.0.0.1:*` — local development
+
+See [`server.js`](./server.js) for the exact regex list.
+
+## Keep-warm
+
+Render's Free Tier spins down after ~15 minutes of inactivity, which would force the first user request after a quiet period to wait 15–30 s for a cold start. A scheduled GitHub Actions workflow ([`.github/workflows/keep-warm.yml`](./.github/workflows/keep-warm.yml)) pings `/health` every 10 minutes to keep the dyno warm 24/7.
+
+Total monthly compute fits inside the Free Tier 750h/month ceiling. If usage grows or Render's policy changes, upgrade to Render Starter ($7/mo) and delete the workflow.
 
 ## Overview
 
