@@ -110,21 +110,52 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit);
 
-// Request logging middleware
+// Strip query string + path from a stream URL before logging it.
+// Stream URLs supplied by the client can carry session tokens in their path
+// or query string (NTS subscriber feeds, token-gated Icecast mounts).
+// Logging only the origin gives us enough diagnostic signal (which station
+// host pattern was used) without persisting credentials.
+function redactStreamUrl(u) {
+  if (!u || typeof u !== 'string') return u;
+  try {
+    const parsed = new URL(u);
+    return `${parsed.protocol}//${parsed.host}/<redacted>`;
+  } catch {
+    return '<unparseable-url>';
+  }
+}
+
+// Request logging middleware.
+// We deliberately log `req.path` (not `req.url`) and a redacted query summary
+// instead of the raw query string. The `url` parameter contains arbitrary
+// stream URLs supplied by the client; some streams embed session tokens in
+// their query string (NTS subscriber feeds, token-gated Icecast mounts, etc.).
+// Logging those tokens — even just to stdout that's eventually rotated by the
+// hosting platform — is a leak we don't need.
 app.use((req, res, next) => {
   const startTime = Date.now();
-  
   res.on('finish', () => {
     const duration = Date.now() - startTime;
+    // Build a redacted query summary: keys present, values omitted, except
+    // for the safe non-secret `stationId` and `country` which are useful for
+    // diagnostics.
+    const safeQuery = {};
+    for (const key of Object.keys(req.query || {})) {
+      if (key === 'stationId' || key === 'country') {
+        safeQuery[key] = req.query[key];
+      } else {
+        safeQuery[key] = '<redacted>';
+      }
+    }
     logger.info({
       method: req.method,
-      url: req.url,
+      path: req.path,
+      query: safeQuery,
       status: res.statusCode,
       duration,
-      ip: req.ip
+      ip: req.ip,
     }, 'Request completed');
   });
-  
   next();
 });
 
@@ -272,7 +303,7 @@ async function fetchAndParseM3U(url) {
     return streamUrl;
     
   } catch (error) {
-    logger.error({ url, error: error.message }, 'M3U playlist fetch failed');
+    logger.error({ playlistHost: redactStreamUrl(url), error: error.message }, 'M3U playlist fetch failed');
     throw error;
   }
 }
@@ -330,7 +361,7 @@ async function fetchAndParsePLS(url) {
     return streamUrl;
     
   } catch (error) {
-    logger.error({ url, error: error.message }, 'PLS playlist fetch failed');
+    logger.error({ playlistHost: redactStreamUrl(url), error: error.message }, 'PLS playlist fetch failed');
     throw error;
   }
 }
@@ -406,7 +437,7 @@ app.get('/v1/metadata', async (req, res) => {
   // Check cache first
   const cached = cache.get(cacheKey);
   if (cached) {
-    logger.debug({ streamUrl, cacheKey }, 'Cache hit');
+    logger.debug({ streamHost: redactStreamUrl(streamUrl) }, 'Cache hit');
     return res.json(cached);
   }
   
@@ -443,19 +474,19 @@ app.get('/v1/metadata', async (req, res) => {
     // Cache the response
     cache.set(cacheKey, response, { ttl: response.cacheTtl * 1000 });
     
-    logger.debug({ 
-      streamUrl, 
-      source: response.source, 
-      display: response.display 
+    logger.debug({
+      streamHost: redactStreamUrl(streamUrl),
+      source: response.source,
+      display: response.display,
     }, 'Metadata fetched successfully');
     
     res.json(response);
     
   } catch (error) {
-    logger.error({ 
-      error: error.message, 
-      streamUrl, 
-      stack: error.stack 
+    logger.error({
+      error: error.message,
+      streamHost: redactStreamUrl(streamUrl),
+      stack: error.stack,
     }, 'Metadata fetch failed');
     
     const errorResponse = {
