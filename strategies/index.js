@@ -1304,5 +1304,10 @@ module.exports = {
   cleanNowPlaying,
   parseArtistTitle,
   parseStationMetadata,
-  isValidMetadata
+  isValidMetadata,
+  // Exported for tests — not part of the runtime API.
+  isPlaceholder,
+  decodeIcyBytes,
+  selectBestResult,
+  firstNonNullResult,
 };

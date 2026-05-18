@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test test/*.test.js",
+    "check": "node --check server.js && node --check strategies/index.js && node --check lib/safe-fetch.js && node --check lib/single-flight.js && node --check lib/probe-cache.js"
   },
   "keywords": ["radio", "metadata", "proxy", "icy", "icecast"],
   "author": "RadioDock",
