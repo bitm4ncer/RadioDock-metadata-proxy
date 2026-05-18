@@ -23,6 +23,7 @@
 
 const { request } = require('undici');
 const { readBoundedBody } = require('../lib/safe-fetch.js');
+const probeCache = require('../lib/probe-cache.js');
 
 // Timeout configuration - reduced for better responsiveness
 const DEFAULT_TIMEOUT = 6000;
@@ -944,7 +945,10 @@ async function fetchGenericMetadata(streamUrl, station, { signal } = {}) {
       }
     }
     
-    // Try common metadata endpoints based on station URL
+    // Try common metadata endpoints based on station URL.
+    // Path-negative cache (lib/probe-cache.js) records which of these paths
+    // returned 4xx/5xx/timeout per host so a subsequent miss only re-probes
+    // the unknown ones, and tries known-good paths first.
     const metadataEndpoints = [
       `${urlObj.protocol}//${urlObj.host}/api/nowplaying`,
       `${urlObj.protocol}//${urlObj.host}/nowplaying`,
@@ -957,17 +961,25 @@ async function fetchGenericMetadata(streamUrl, station, { signal } = {}) {
       `${urlObj.protocol}//${urlObj.host}/stats`,
       `${urlObj.protocol}//${urlObj.host}/7.html`
     ];
-    
-    for (const endpoint of metadataEndpoints) {
+
+    const { positives, unknown } = probeCache.orderCandidates(urlObj.host, metadataEndpoints);
+    const orderedCandidates = [...positives, ...unknown];
+
+    for (const endpoint of orderedCandidates) {
       if (signal?.aborted) return null;
+      const probePath = (() => { try { return new URL(endpoint).pathname; } catch (_) { return endpoint; } })();
       try {
         const response = await fetchWithTimeout(endpoint, { signal }, 3000);
-        if (!response.ok) continue;
-        
+        if (!response.ok) {
+          probeCache.markNegative(urlObj.host, probePath);
+          continue;
+        }
+
         const data = await response.json();
         const parsed = parseStationMetadata(data);
-        
+
         if (parsed && isValidMetadata({ display: parsed })) {
+          probeCache.markPositive(urlObj.host, probePath);
           return {
             source: 'generic-api',
             display: parsed,
@@ -978,7 +990,11 @@ async function fetchGenericMetadata(streamUrl, station, { signal } = {}) {
             cacheTtl: 15
           };
         }
+        // 2xx but no useful metadata — neutral; don't poison the cache.
       } catch (error) {
+        // Parent-abort isn't a host problem — don't mark negative.
+        if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') return null;
+        probeCache.markNegative(urlObj.host, probePath);
         continue;
       }
     }
