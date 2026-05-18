@@ -678,6 +678,151 @@ async function fetchHKCRMetadata({ signal } = {}) {
   }
 }
 
+// ROVR (rovr.live) — London-based curated radio. HLS stream, no in-band
+// metadata, but their Strapi CMS exposes the current schedule at
+//   GET https://strapi.rovr.live/api/schedules/radio/public?date=<YYYY-MM-DD HH:MM:SS>
+// returning { data: [ { startTime, endTime, show: { title, curators: [...] } } ] }
+// where data[0] is the show currently on air (per the ROVR app's own client
+// code). startTime / endTime are wall-clock strings in London local time.
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// Format a Date as "YYYY-MM-DD HH:MM:SS" in a fixed UTC offset (minutes).
+function formatWallclock(d, offsetMinutes = 0) {
+  const t = new Date(d.getTime() + offsetMinutes * 60 * 1000);
+  return `${t.getUTCFullYear()}-${pad2(t.getUTCMonth() + 1)}-${pad2(t.getUTCDate())} `
+       + `${pad2(t.getUTCHours())}:${pad2(t.getUTCMinutes())}:${pad2(t.getUTCSeconds())}`;
+}
+
+function isRovrStreamUrl(streamUrl) {
+  try {
+    const h = new URL(streamUrl).hostname.toLowerCase();
+    return h === 'rovr.live' || h.endsWith('.rovr.live');
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchROVRMetadata({ signal } = {}) {
+  try {
+    // London is UTC+0 in winter, UTC+1 in BST. Send UTC — Strapi's query
+    // appears to match against epoch-equivalent times regardless of the
+    // displayed offset. Empirically a UTC query returns the show airing
+    // right now.
+    const dateParam = formatWallclock(new Date(), 0);
+    const url = `https://strapi.rovr.live/api/schedules/radio/public?date=${encodeURIComponent(dateParam)}`;
+    const response = await fetchWithTimeout(url, { signal }, 4000);
+    if (!response.ok) return null;
+    const json = await response.json();
+    const slot = Array.isArray(json?.data) ? json.data[0] : null;
+    if (!slot || !slot.show) return null;
+    const showTitle = (slot.show.title || '').trim();
+    if (!showTitle) return null;
+    const curatorName = Array.isArray(slot.show.curators) && slot.show.curators[0]?.name
+      ? String(slot.show.curators[0].name).trim()
+      : '';
+    const display = cleanNowPlaying(
+      curatorName && curatorName !== showTitle
+        ? `${showTitle} - ${curatorName}`
+        : showTitle,
+    );
+    if (!display || !isValidMetadata({ display })) return null;
+    return {
+      source: 'rovr-schedule',
+      display,
+      artist: curatorName || null,
+      title: showTitle,
+      raw: {
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        showId: slot.show.id,
+        radioImage: slot.show.radioImage?.url || null,
+      },
+      confidence: 0.9,
+      cacheTtl: 60,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Rinse FM — Craft CMS GraphQL response served at
+//   GET https://www.rinse.fm/api/query/v1/schedule/
+// returning { episodes: [...] } where each episode has:
+//   episodeTime: ISO with Europe/London offset
+//   episodeLength: minutes
+//   parentShow: [{ title, slug }]
+//   channel: [{ slug, streamerMountPoint }]
+// Episodes from every channel (uk, fr, kool, ...) are in one response, so
+// we filter by matching the request's stream URL against
+// channel[0].streamerMountPoint.
+
+function findCurrentRinseEpisode(episodes, streamUrl, now = new Date()) {
+  if (!Array.isArray(episodes)) return null;
+  const t = now instanceof Date ? now.getTime() : Number(now);
+  if (!Number.isFinite(t)) return null;
+  const target = String(streamUrl || '').toLowerCase();
+  if (!target) return null;
+  for (const ep of episodes) {
+    if (!ep || typeof ep !== 'object') continue;
+    const mount = ep.channel?.[0]?.streamerMountPoint;
+    if (typeof mount !== 'string' || mount.toLowerCase() !== target) continue;
+    if (!ep.episodeTime || typeof ep.episodeTime !== 'string') continue;
+    const start = Date.parse(ep.episodeTime);
+    if (!Number.isFinite(start)) continue;
+    const lengthMin = Number(ep.episodeLength);
+    if (!Number.isFinite(lengthMin) || lengthMin <= 0) continue;
+    const end = start + lengthMin * 60 * 1000;
+    if (t >= start && t < end) return ep;
+  }
+  return null;
+}
+
+function isRinseStreamUrl(streamUrl) {
+  try {
+    const h = new URL(streamUrl).hostname.toLowerCase();
+    return h === 'rinse.fm' || h.endsWith('.rinse.fm');
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchRinseFMMetadata(streamUrl, { signal } = {}) {
+  try {
+    const response = await fetchWithTimeout(
+      'https://www.rinse.fm/api/query/v1/schedule/',
+      { signal },
+      5000,
+    );
+    if (!response.ok) return null;
+    const json = await response.json();
+    const ep = findCurrentRinseEpisode(json?.episodes, streamUrl, new Date());
+    if (!ep) return null;
+    // Prefer the clean parent-show title ("Suzie Bakos") over the dated
+    // episode title ("Suzie Bakos - 19/05/2026 - 13:00").
+    const cleanTitle = ep.parentShow?.[0]?.title || ep.title || '';
+    const display = cleanNowPlaying(cleanTitle);
+    if (!display || !isValidMetadata({ display })) return null;
+    return {
+      source: 'rinse-schedule',
+      display,
+      artist: null,
+      title: display,
+      raw: {
+        episodeId: ep.id,
+        episodeTime: ep.episodeTime,
+        episodeLength: ep.episodeLength,
+        channel: ep.channel?.[0]?.slug || null,
+        isRebroadcast: !!ep.isRebroadcast,
+      },
+      confidence: 0.9,
+      cacheTtl: 60,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 // Radio.co stations expose a clean public JSON API at
 // https://public.radio.co/stations/<id>/status. The station id is the path
 // segment in the stream URL, e.g. https://streaming.radio.co/s3699c5e49/listen
@@ -1242,10 +1387,20 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
   // Station-specific handlers for stations whose audio is HLS but whose
   // now-playing data is exposed via a separate API. Must run BEFORE the
   // generic .m3u8 bail below — otherwise these never reach their strategy.
-  if (streamUrl.includes('hkcr.live')) {
+  // Schedule-aware short-circuits for stations whose audio is HLS but whose
+  // now-playing data is exposed via a separate scheduling API. Each handler
+  // gets a fresh AbortController so a hung upstream doesn't bleed into
+  // unrelated paths.
+  const scheduleHandlers = [
+    { match: (u) => isHKCRStreamUrl(u),  run: (u, sig) => fetchHKCRMetadata({ signal: sig }) },
+    { match: (u) => isRovrStreamUrl(u),  run: (u, sig) => fetchROVRMetadata({ signal: sig }) },
+    { match: (u) => isRinseStreamUrl(u), run: (u, sig) => fetchRinseFMMetadata(u, { signal: sig }) },
+  ];
+  const matchedHandler = scheduleHandlers.find((h) => h.match(streamUrl));
+  if (matchedHandler) {
     const parentCtrl = new AbortController();
     const result = await Promise.race([
-      fetchHKCRMetadata({ signal: parentCtrl.signal }),
+      matchedHandler.run(streamUrl, parentCtrl.signal),
       new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
     ]).catch(() => null);
     try { parentCtrl.abort(); } catch (_) {}
@@ -1484,4 +1639,5 @@ module.exports = {
   selectBestResult,
   firstNonNullResult,
   findCurrentHKCRShow,
+  findCurrentRinseEpisode,
 };
