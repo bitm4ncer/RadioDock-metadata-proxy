@@ -434,6 +434,141 @@ async function fetchCashmereMetadata() {
   }
 }
 
+// Radio.co stations expose a clean public JSON API at
+// https://public.radio.co/stations/<id>/status. The station id is the path
+// segment in the stream URL, e.g. https://streaming.radio.co/s3699c5e49/listen
+// -> station id "s3699c5e49". Detection is conservative: host must end in
+// .radio.co or radio.co exactly.
+async function fetchRadioCoMetadata(streamUrl) {
+  try {
+    const u = new URL(streamUrl);
+    if (!/(^|\.)radio\.co$/i.test(u.hostname)) return null;
+    const m = u.pathname.match(/\/(s[a-z0-9]+)\b/i);
+    if (!m) return null;
+    const stationId = m[1];
+    const response = await fetchWithTimeout(
+      `https://public.radio.co/stations/${stationId}/status`,
+      {},
+      4000,
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    const title = (data?.current_track?.title || '').trim();
+    if (!title) return null;
+    const display = cleanNowPlaying(title);
+    if (!display || !isValidMetadata({ display })) return null;
+    let artist = null;
+    let trackTitle = null;
+    if (display.includes(' - ')) {
+      const parts = display.split(' - ');
+      artist = parts[0].trim();
+      trackTitle = parts.slice(1).join(' - ').trim();
+    }
+    return {
+      source: 'radio-co',
+      display,
+      artist,
+      title: trackTitle,
+      raw: { current_track: data.current_track, status: data.status },
+      confidence: 0.9,
+      cacheTtl: 30,
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// AzuraCast exposes /api/nowplaying_static/<shortcode>.json on the host that
+// also serves the stream. The shortcode is in the stream path:
+//   https://radio.example.com/listen/myradio/radio.mp3 -> "myradio"
+// We probe defensively — if the host isn't AzuraCast we get a fast 404.
+async function fetchAzuraCastMetadata(streamUrl) {
+  try {
+    const u = new URL(streamUrl);
+    const m = u.pathname.match(/^\/listen\/([A-Za-z0-9_-]+)\b/);
+    if (!m) return null;
+    const shortcode = m[1];
+    const endpoints = [
+      `${u.protocol}//${u.host}/api/nowplaying_static/${shortcode}.json`,
+      `${u.protocol}//${u.host}/api/nowplaying/${shortcode}`,
+    ];
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetchWithTimeout(endpoint, {}, 3000);
+        if (!response.ok) continue;
+        const data = await response.json();
+        // Static endpoint returns a single object; non-static returns the
+        // same shape but is the canonical source if the static is stale.
+        const song = data?.now_playing?.song || data?.now_playing;
+        if (!song) continue;
+        const artist = (song.artist || '').trim();
+        const trackTitle = (song.title || '').trim();
+        const text = (song.text || '').trim();
+        let display = '';
+        if (artist && trackTitle && artist !== trackTitle) {
+          display = `${artist} - ${trackTitle}`;
+        } else if (text) {
+          display = text;
+        } else if (trackTitle) {
+          display = trackTitle;
+        } else if (artist) {
+          display = artist;
+        }
+        display = cleanNowPlaying(display);
+        if (!display || !isValidMetadata({ display })) continue;
+        return {
+          source: 'azuracast',
+          display,
+          artist: artist || null,
+          title: trackTitle || null,
+          raw: { now_playing: data.now_playing, station: data.station },
+          confidence: 0.9,
+          cacheTtl: 20,
+        };
+      } catch (e) {
+        continue;
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Shoutcast v2 SC_TRANS exposes JSON stats at /stats?json=1.
+// Response shape: { songtitle: "Artist - Title", streamtitle, servertitle, ... }
+async function fetchShoutcastV2Metadata(streamUrl) {
+  try {
+    const u = new URL(streamUrl);
+    const endpoint = `${u.protocol}//${u.host}/stats?json=1`;
+    const response = await fetchWithTimeout(endpoint, {}, 3000);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const songtitle = (data?.songtitle || '').trim();
+    if (!songtitle) return null;
+    const display = cleanNowPlaying(songtitle);
+    if (!display || !isValidMetadata({ display })) return null;
+    let artist = null;
+    let trackTitle = null;
+    if (display.includes(' - ')) {
+      const parts = display.split(' - ');
+      artist = parts[0].trim();
+      trackTitle = parts.slice(1).join(' - ').trim();
+    }
+    return {
+      source: 'shoutcast-v2',
+      display,
+      artist,
+      title: trackTitle,
+      raw: data,
+      confidence: 0.85,
+      cacheTtl: 15,
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 // Icecast status JSON endpoints
 async function fetchIcecastMetadata(endpoints, mount) {
   try {
@@ -903,10 +1038,22 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
     } else if (streamUrl.includes('.out.airtime.pro')) {
       strategies.push(() => fetchAirtimeProMetadata(streamUrl));
     }
-    
-    // Add concurrent strategies for all streams
+
     const urlObj = new URL(streamUrl);
     const host = urlObj.host;
+
+    // Radio.co — public JSON API for any *.radio.co stream
+    if (/(^|\.)radio\.co$/i.test(urlObj.hostname)) {
+      strategies.push(() => fetchRadioCoMetadata(streamUrl));
+    }
+
+    // AzuraCast — detected via /listen/<shortcode>/ path on the stream host
+    if (/^\/listen\/[A-Za-z0-9_-]+\b/.test(urlObj.pathname)) {
+      strategies.push(() => fetchAzuraCastMetadata(streamUrl));
+    }
+
+    // Shoutcast v2 — cheap to probe, runs in parallel; null-result if not v2
+    strategies.push(() => fetchShoutcastV2Metadata(streamUrl));
     
     // Icecast status endpoints
     const icecastEndpoints = [
