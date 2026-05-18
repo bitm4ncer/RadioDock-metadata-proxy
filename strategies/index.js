@@ -78,14 +78,26 @@ function cleanNowPlaying(text) {
   }
 }
 
-// HTTP request utility with timeout
+// HTTP request utility with timeout. Accepts an optional external `signal`
+// in `options` so the caller (fetchMetadata's strategy race) can abort
+// losing in-flight requests once a winner is selected, freeing sockets.
 async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
+
+  // Forward an external abort onto our internal controller so the request is
+  // cancelled even when the timeout hasn't fired yet.
+  const externalSignal = options.signal;
+  const forwardAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', forwardAbort, { once: true });
+  }
+
   try {
+    const { signal: _ignored, ...restOptions } = options; // we set signal explicitly below
     const response = await request(url, {
-      ...options,
+      ...restOptions,
       signal: controller.signal,
       followRedirects: true,
       maxRedirections: 3,
@@ -95,8 +107,9 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
         ...options.headers
       }
     });
-    
+
     clearTimeout(timeoutId);
+    if (externalSignal) externalSignal.removeEventListener('abort', forwardAbort);
     return {
       ok: response.statusCode >= 200 && response.statusCode < 300,
       status: response.statusCode,
@@ -114,6 +127,7 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
     };
   } catch (error) {
     clearTimeout(timeoutId);
+    if (externalSignal) externalSignal.removeEventListener('abort', forwardAbort);
     throw error;
   }
 }
@@ -263,38 +277,90 @@ function parseStationMetadata(data) {
   return parseArtistTitle(nowPlaying, artist, title);
 }
 
-// Utility to wait for first resolved promise
+// Simple first-non-null race. Used inside individual strategies that probe
+// several equivalent endpoints (e.g. Icecast tries /status-json.xsl,
+// /status.json, /stats.json in parallel). Confidence weighting doesn't apply
+// here because all endpoints belong to the same source.
 function firstNonNullResult(promises) {
   return new Promise((resolve) => {
-    let remaining = promises.length;
+    let remaining = Array.isArray(promises) ? promises.length : 0;
     let resolved = false;
     if (remaining === 0) return resolve(null);
-    
-    promises.forEach(promise => {
-      promise.then(result => {
-        if (!resolved && result && result.display) {
+    promises.forEach((promise) => {
+      promise.then((result) => {
+        if (!resolved && result && (result.display || result.ok !== false)) {
           resolved = true;
           resolve(result);
         }
       }).catch(() => {}).finally(() => {
         remaining -= 1;
-        if (!resolved && remaining === 0) {
-          resolve(null);
+        if (!resolved && remaining === 0) resolve(null);
+      });
+    });
+  });
+}
+
+// Pick the best result from a parallel strategy race.
+//
+// The previous implementation took the *first* non-null result, which meant
+// a fast low-confidence strategy (e.g. icy-headers fallback, 0.7) could win
+// over a slower but more accurate one (e.g. icy in-stream block, 0.95).
+//
+// New behaviour:
+//   1. As soon as ANY strategy returns a non-null result, start a short
+//      "harvest window" (default 600ms).
+//   2. While the window is open, collect every other non-null result that
+//      arrives.
+//   3. When the window closes (or all strategies settle), pick the highest-
+//      confidence result and abort the rest via the parent controller.
+//
+// This keeps latency close to first-hit while giving slightly slower
+// high-confidence strategies a chance to overtake.
+function selectBestResult(promises, parentCtrl, { harvestMs = 600 } = {}) {
+  return new Promise((resolve) => {
+    if (!Array.isArray(promises) || promises.length === 0) return resolve(null);
+    const harvest = [];
+    let resolved = false;
+    let remaining = promises.length;
+    let harvestTimer = null;
+
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      if (harvestTimer) clearTimeout(harvestTimer);
+      try { parentCtrl?.abort(); } catch (_) { /* noop */ }
+      if (harvest.length === 0) return resolve(null);
+      harvest.sort((a, b) => (b?.confidence ?? 0) - (a?.confidence ?? 0));
+      resolve(harvest[0]);
+    };
+
+    promises.forEach((promise) => {
+      promise.then((result) => {
+        if (resolved) return;
+        if (result && result.display) {
+          harvest.push(result);
+          if (harvestTimer === null) {
+            harvestTimer = setTimeout(finish, harvestMs);
+          }
         }
+      }).catch(() => {}).finally(() => {
+        if (resolved) return;
+        remaining -= 1;
+        if (remaining === 0) finish();
       });
     });
   });
 }
 
 // NTS Radio API integration
-async function fetchNTSMetadata(streamUrl, stationId) {
+async function fetchNTSMetadata(streamUrl, stationId, { signal } = {}) {
   try {
     // Only use NTS API for main live channels (stream-relay)
     if (!streamUrl.includes('stream-relay-geo.ntslive.net')) {
       return null;
     }
-    
-    const response = await fetchWithTimeout('https://www.nts.live/api/v2/live', {}, 5000);
+
+    const response = await fetchWithTimeout('https://www.nts.live/api/v2/live', { signal }, 5000);
     if (!response.ok) throw new Error(`NTS API error: ${response.status}`);
     
     const data = await response.json();
@@ -404,12 +470,12 @@ function parseAirtimeProNowPlaying(data) {
   return cleanNowPlaying(nowPlaying);
 }
 
-async function fetchAirtimeProMetadata(streamUrl, providedEndpoint) {
+async function fetchAirtimeProMetadata(streamUrl, providedEndpoint, { signal } = {}) {
   try {
     const endpoint = providedEndpoint || deriveAirtimeProEndpointFromStream(streamUrl);
     if (!endpoint) return null;
 
-    const response = await fetchWithTimeout(endpoint, {}, 5000);
+    const response = await fetchWithTimeout(endpoint, { signal }, 5000);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -434,10 +500,10 @@ async function fetchAirtimeProMetadata(streamUrl, providedEndpoint) {
 }
 
 // Cashmere Radio (specific Airtime Pro instance)
-async function fetchCashmereMetadata() {
+async function fetchCashmereMetadata({ signal } = {}) {
   try {
     const endpoint = 'https://cashmereradio.airtime.pro/api/live-info-v2';
-    const response = await fetchWithTimeout(endpoint, {}, 5000);
+    const response = await fetchWithTimeout(endpoint, { signal }, 5000);
     if (!response.ok) throw new Error(`Cashmere API error: ${response.status}`);
 
     const data = await response.json();
@@ -467,7 +533,7 @@ async function fetchCashmereMetadata() {
 // segment in the stream URL, e.g. https://streaming.radio.co/s3699c5e49/listen
 // -> station id "s3699c5e49". Detection is conservative: host must end in
 // .radio.co or radio.co exactly.
-async function fetchRadioCoMetadata(streamUrl) {
+async function fetchRadioCoMetadata(streamUrl, { signal } = {}) {
   try {
     const u = new URL(streamUrl);
     if (!/(^|\.)radio\.co$/i.test(u.hostname)) return null;
@@ -476,7 +542,7 @@ async function fetchRadioCoMetadata(streamUrl) {
     const stationId = m[1];
     const response = await fetchWithTimeout(
       `https://public.radio.co/stations/${stationId}/status`,
-      {},
+      { signal },
       4000,
     );
     if (!response.ok) return null;
@@ -510,7 +576,7 @@ async function fetchRadioCoMetadata(streamUrl) {
 // also serves the stream. The shortcode is in the stream path:
 //   https://radio.example.com/listen/myradio/radio.mp3 -> "myradio"
 // We probe defensively — if the host isn't AzuraCast we get a fast 404.
-async function fetchAzuraCastMetadata(streamUrl) {
+async function fetchAzuraCastMetadata(streamUrl, { signal } = {}) {
   try {
     const u = new URL(streamUrl);
     const m = u.pathname.match(/^\/listen\/([A-Za-z0-9_-]+)\b/);
@@ -521,8 +587,9 @@ async function fetchAzuraCastMetadata(streamUrl) {
       `${u.protocol}//${u.host}/api/nowplaying/${shortcode}`,
     ];
     for (const endpoint of endpoints) {
+      if (signal?.aborted) return null;
       try {
-        const response = await fetchWithTimeout(endpoint, {}, 3000);
+        const response = await fetchWithTimeout(endpoint, { signal }, 3000);
         if (!response.ok) continue;
         const data = await response.json();
         // Static endpoint returns a single object; non-static returns the
@@ -565,11 +632,11 @@ async function fetchAzuraCastMetadata(streamUrl) {
 
 // Shoutcast v2 SC_TRANS exposes JSON stats at /stats?json=1.
 // Response shape: { songtitle: "Artist - Title", streamtitle, servertitle, ... }
-async function fetchShoutcastV2Metadata(streamUrl) {
+async function fetchShoutcastV2Metadata(streamUrl, { signal } = {}) {
   try {
     const u = new URL(streamUrl);
     const endpoint = `${u.protocol}//${u.host}/stats?json=1`;
-    const response = await fetchWithTimeout(endpoint, {}, 3000);
+    const response = await fetchWithTimeout(endpoint, { signal }, 3000);
     if (!response.ok) return null;
     const data = await response.json();
     const songtitle = (data?.songtitle || '').trim();
@@ -598,11 +665,11 @@ async function fetchShoutcastV2Metadata(streamUrl) {
 }
 
 // Icecast status JSON endpoints
-async function fetchIcecastMetadata(endpoints, mount) {
+async function fetchIcecastMetadata(endpoints, mount, { signal } = {}) {
   try {
     const attempt = async (statusUrl) => {
       try {
-        const response = await fetchWithTimeout(statusUrl, {}, FAST_TIMEOUT);
+        const response = await fetchWithTimeout(statusUrl, { signal }, FAST_TIMEOUT);
         if (!response.ok) return null;
 
         const data = await response.json();
@@ -664,11 +731,12 @@ async function fetchIcecastMetadata(endpoints, mount) {
 }
 
 // ICY metadata parsing using the same logic as the working old version (adapted for Node.js)
-async function fetchICYMetadata(streamUrl) {
+async function fetchICYMetadata(streamUrl, { signal } = {}) {
   try {
-    
+
     const response = await fetchWithTimeout(streamUrl, {
       method: 'GET',
+      signal,
       headers: {
         'Icy-MetaData': '1',
         'User-Agent': 'RadioDock/1.0'
@@ -784,14 +852,14 @@ async function fetchICYMetadata(streamUrl) {
 }
 
 // Generic metadata fetcher for various station APIs
-async function fetchGenericMetadata(streamUrl, station) {
+async function fetchGenericMetadata(streamUrl, station, { signal } = {}) {
   try {
     const urlObj = new URL(streamUrl);
-    
+
     // Special handling for Callshop Radio
     if (streamUrl.includes('callshopradio.com')) {
       try {
-        const response = await fetchWithTimeout('https://icecast.callshopradio.com/status-json.xsl');
+        const response = await fetchWithTimeout('https://icecast.callshopradio.com/status-json.xsl', { signal });
         
         if (response.ok) {
           const data = await response.json();
@@ -839,9 +907,9 @@ async function fetchGenericMetadata(streamUrl, station) {
         
         
         for (const endpoint of radioKingEndpoints) {
-          
+          if (signal?.aborted) return null;
           try {
-            const response = await fetchWithTimeout(endpoint, {}, 3000);
+            const response = await fetchWithTimeout(endpoint, { signal }, 3000);
             
             if (response.ok) {
               const data = await response.json();
@@ -891,8 +959,9 @@ async function fetchGenericMetadata(streamUrl, station) {
     ];
     
     for (const endpoint of metadataEndpoints) {
+      if (signal?.aborted) return null;
       try {
-        const response = await fetchWithTimeout(endpoint, {}, 3000);
+        const response = await fetchWithTimeout(endpoint, { signal }, 3000);
         if (!response.ok) continue;
         
         const data = await response.json();
@@ -921,11 +990,11 @@ async function fetchGenericMetadata(streamUrl, station) {
 }
 
 // Radio-Browser API metadata fallback
-async function fetchRadioBrowserMetadata(station) {
+async function fetchRadioBrowserMetadata(station, { signal } = {}) {
   try {
     if (!station.stationId) return null;
-    
-    const response = await fetchWithTimeout(`https://de1.api.radio-browser.info/json/stations/byuuid/${station.stationId}`);
+
+    const response = await fetchWithTimeout(`https://de1.api.radio-browser.info/json/stations/byuuid/${station.stationId}`, { signal });
     if (!response.ok) throw new Error(`Radio-Browser API error: ${response.status}`);
     
     const stations = await response.json();
@@ -1015,25 +1084,29 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
   
   const station = { stationId, url: streamUrl, homepage, country };
   const strategies = [];
-  
+
+  // Parent controller — selectBestResult aborts() this once it picks a
+  // winner, which cancels every losing in-flight upstream request so we
+  // don't leak sockets or read bodies we'll never use.
+  const parentCtrl = new AbortController();
+  const opts = { signal: parentCtrl.signal };
+
   try {
-    // Strategy selection based on hostname/URL patterns
-    
     // German public broadcasters (WDR, ARD)
-    if (streamUrl.includes('wdr') || streamUrl.includes('rndfnk.com') || 
+    if (streamUrl.includes('wdr') || streamUrl.includes('rndfnk.com') ||
         streamUrl.includes('1live') || streamUrl.includes('wdr2') ||
         streamUrl.includes('wdr3') || streamUrl.includes('wdr4') || streamUrl.includes('wdr5')) {
-      strategies.push(() => fetchWDRMetadata(streamUrl, station));
+      strategies.push(() => fetchWDRMetadata(streamUrl, station, opts));
     }
-    
+
     if (streamUrl.includes('stream-relay-geo.ntslive.net')) {
-      strategies.push(() => fetchNTSMetadata(streamUrl, stationId));
+      strategies.push(() => fetchNTSMetadata(streamUrl, stationId, opts));
     }
-    
+
     if (streamUrl.includes('cashmereradio.airtime.pro')) {
-      strategies.push(() => fetchCashmereMetadata());
+      strategies.push(() => fetchCashmereMetadata(opts));
     } else if (streamUrl.includes('.out.airtime.pro')) {
-      strategies.push(() => fetchAirtimeProMetadata(streamUrl));
+      strategies.push(() => fetchAirtimeProMetadata(streamUrl, undefined, opts));
     }
 
     const urlObj = new URL(streamUrl);
@@ -1041,17 +1114,17 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
 
     // Radio.co — public JSON API for any *.radio.co stream
     if (/(^|\.)radio\.co$/i.test(urlObj.hostname)) {
-      strategies.push(() => fetchRadioCoMetadata(streamUrl));
+      strategies.push(() => fetchRadioCoMetadata(streamUrl, opts));
     }
 
     // AzuraCast — detected via /listen/<shortcode>/ path on the stream host
     if (/^\/listen\/[A-Za-z0-9_-]+\b/.test(urlObj.pathname)) {
-      strategies.push(() => fetchAzuraCastMetadata(streamUrl));
+      strategies.push(() => fetchAzuraCastMetadata(streamUrl, opts));
     }
 
     // Shoutcast v2 — cheap to probe, runs in parallel; null-result if not v2
-    strategies.push(() => fetchShoutcastV2Metadata(streamUrl));
-    
+    strategies.push(() => fetchShoutcastV2Metadata(streamUrl, opts));
+
     // Icecast status endpoints
     const icecastEndpoints = [
       `${urlObj.protocol}//${host}/status-json.xsl`,
@@ -1059,34 +1132,41 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
       `${urlObj.protocol}//${host}/stats.json`,
       `${urlObj.protocol}//${host}/status?json=1`
     ];
-    strategies.push(() => fetchIcecastMetadata(icecastEndpoints, urlObj.pathname));
-    
-    // ICY metadata
-    strategies.push(() => fetchICYMetadata(streamUrl));
-    
+    strategies.push(() => fetchIcecastMetadata(icecastEndpoints, urlObj.pathname, opts));
+
+    // ICY metadata — slowest strategy (8s timeout). With the new harvest
+    // window (~600ms) plus parent-abort, a faster low-confidence strategy
+    // no longer wins permanently; ICY's 0.95 confidence overtakes a
+    // 0.7-0.8 result if it lands inside the window.
+    strategies.push(() => fetchICYMetadata(streamUrl, opts));
+
     // Generic API endpoints
-    strategies.push(() => fetchGenericMetadata(streamUrl, station));
-    
+    strategies.push(() => fetchGenericMetadata(streamUrl, station, opts));
+
     // Radio Browser fallback
     if (stationId) {
-      strategies.push(() => fetchRadioBrowserMetadata(station));
+      strategies.push(() => fetchRadioBrowserMetadata(station, opts));
     }
-    
+
     // Station info fallback disabled - better to show nothing than redundant station name
     // strategies.push(() => fetchStationInfoFallback(station));
-    
-    // Execute strategies concurrently with individual timeouts
-    const promises = strategies.map(strategy => 
+
+    // Execute strategies concurrently with individual timeouts. The 5s cap
+    // is a backstop; selectBestResult will normally finish well before that.
+    const promises = strategies.map((strategy) =>
       Promise.race([
         strategy(),
-        new Promise(resolve => setTimeout(() => resolve(null), 5000)) // 5s per strategy
-      ]).catch(err => {
-        console.error('Strategy failed:', err.message || err);
+        new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+      ]).catch((err) => {
+        // AbortError is expected when selectBestResult aborts losers.
+        if (err?.name !== 'AbortError' && err?.code !== 'ABORT_ERR') {
+          console.error('Strategy failed:', err.message || err);
+        }
         return null;
       })
     );
-    
-    const result = await firstNonNullResult(promises);
+
+    const result = await selectBestResult(promises, parentCtrl, { harvestMs: 600 });
     
     if (result && result.display) {
       return {
@@ -1103,18 +1183,24 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
       ok: false,
       reason: 'no-metadata'
     };
-    
+
   } catch (error) {
     console.error('Metadata fetch failed:', error);
     return {
       ok: false,
       reason: 'upstream-error'
     };
+  } finally {
+    // Belt-and-suspenders: selectBestResult already aborts on its happy
+    // path, but if we threw before reaching it (or returned early after
+    // an HLS check etc.) we still want to release any handlers waiting on
+    // the signal.
+    try { parentCtrl.abort(); } catch (_) { /* noop */ }
   }
 }
 
 // WDR/ARD German Public Broadcaster metadata
-async function fetchWDRMetadata(streamUrl, station) {
+async function fetchWDRMetadata(streamUrl, station, { signal } = {}) {
   try {
     
     // Try to determine the service from the URL
@@ -1137,8 +1223,8 @@ async function fetchWDRMetadata(streamUrl, station) {
     
     // Try WDR's live API endpoint
     const apiUrl = `https://www1.wdr.de/radio/player/live/livesender-${service}-100.json`;
-    
-    const response = await fetchWithTimeout(apiUrl, {}, 5000);
+
+    const response = await fetchWithTimeout(apiUrl, { signal }, 5000);
     if (!response.ok) {
       return null;
     }
