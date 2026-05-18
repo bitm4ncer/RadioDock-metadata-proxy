@@ -353,6 +353,63 @@ function selectBestResult(promises, parentCtrl, { harvestMs = 600 } = {}) {
   });
 }
 
+// Hong Kong Community Radio integration.
+// HKCR streams HLS (no in-stream metadata) but exposes the live schedule
+// at cms.hkcr.live/schedule/current. Each entry has date/startTime/endTime
+// in HK local time (UTC+8, no DST). We pick whichever entry's window
+// contains "now"; outside any window the station plays automated fillers
+// and we return null so the caller falls back to no display.
+const HKCR_HK_OFFSET_MIN = 8 * 60;
+
+function findCurrentHKCRShow(shows, now = new Date()) {
+  if (!Array.isArray(shows)) return null;
+  const nowMs = now.getTime();
+  for (const show of shows) {
+    if (!show || show.cancelledAt) continue;
+    if (!show.title || !show.date || !show.startTime || !show.endTime) continue;
+    const [y, mo, d] = String(show.date).split('-').map(Number);
+    const [sH, sM] = String(show.startTime).split(':').map(Number);
+    const [eH, eM] = String(show.endTime).split(':').map(Number);
+    if (![y, mo, d, sH, sM, eH, eM].every(Number.isFinite)) continue;
+    let startUtcMs = Date.UTC(y, mo - 1, d, sH, sM) - HKCR_HK_OFFSET_MIN * 60_000;
+    let endUtcMs = Date.UTC(y, mo - 1, d, eH, eM) - HKCR_HK_OFFSET_MIN * 60_000;
+    // Defensive: shows that cross midnight (HK time) have endTime <= startTime.
+    if (endUtcMs <= startUtcMs) endUtcMs += 24 * 60 * 60_000;
+    if (nowMs >= startUtcMs && nowMs < endUtcMs) return show;
+  }
+  return null;
+}
+
+async function fetchHKCRMetadata({ signal } = {}) {
+  try {
+    const response = await fetchWithTimeout(
+      'https://cms.hkcr.live/schedule/current',
+      { signal },
+      5000
+    );
+    if (!response.ok) return null;
+    const shows = await response.json();
+    const current = findCurrentHKCRShow(shows);
+    if (!current?.title) return null;
+    const display = cleanNowPlaying(current.title);
+    if (!display) return null;
+    return {
+      source: 'hkcr',
+      display,
+      artist: null,
+      title: null,
+      raw: current,
+      confidence: 0.9,
+      // Show boundaries are on the hour; a 60 s refresh catches the rollover
+      // quickly without hammering the upstream CMS.
+      cacheTtl: 60
+    };
+  } catch (error) {
+    console.error('HKCR API fetch failed:', error);
+    return null;
+  }
+}
+
 // NTS Radio API integration
 async function fetchNTSMetadata(streamUrl, stationId, { signal } = {}) {
   try {
@@ -525,6 +582,98 @@ async function fetchCashmereMetadata({ signal } = {}) {
     return null;
   } catch (error) {
     console.error('Cashmere metadata fetch failed:', error);
+    return null;
+  }
+}
+
+// Hong Kong Community Radio (HKCR) broadcasts as an HLS stream
+// (stream-test.hkcr.live/hls/main.m3u8) with no useful in-band metadata —
+// the actual programming is a hand-curated schedule kept in HKCR's CMS.
+//
+// The CMS exposes the current week's schedule at
+//   GET https://cms.hkcr.live/schedule/current
+// returning an array of show objects of shape:
+//   { _id, title, description, date: "YYYY-MM-DD", startTime: "HH:MM",
+//     endTime: "HH:MM", picture, thumbnail, cancelledAt, status, ... }
+// All times are in Hong Kong local time (UTC+8, no DST).
+//
+// findCurrentHKCRShow() is the pure helper that picks the show whose
+// [startTime, endTime) window contains `now`. Exposed for unit tests.
+
+const HK_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// "YYYY-MM-DD" + "HH:MM" in HK local time -> UTC instant (epoch ms).
+// HK is UTC+8 with no DST, so the UTC instant is simply 8 hours earlier than
+// the wall-clock instant. We use Date.UTC to construct the wall-clock instant
+// without involving the host machine's local timezone.
+function hkLocalToUtcMs(dateStr, timeStr) {
+  const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  const tm = /^(\d{2}):(\d{2})$/.exec(timeStr);
+  if (!dm || !tm) return NaN;
+  const y = +dm[1], mo = +dm[2], d = +dm[3];
+  const hh = +tm[1], mm = +tm[2];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mm > 59) return NaN;
+  return Date.UTC(y, mo - 1, d, hh, mm) - HK_OFFSET_MS;
+}
+
+function findCurrentHKCRShow(shows, now = new Date()) {
+  if (!Array.isArray(shows)) return null;
+  const t = now instanceof Date ? now.getTime() : Number(now);
+  if (!Number.isFinite(t)) return null;
+  for (const show of shows) {
+    if (!show || typeof show !== 'object') continue;
+    if (show.cancelledAt) continue;
+    if (typeof show.title !== 'string' || !show.title.trim()) continue;
+    const start = hkLocalToUtcMs(show.date, show.startTime);
+    let end = hkLocalToUtcMs(show.date, show.endTime);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    // Midnight-crossing window — e.g. 23:00 -> 01:00 — means the end is the
+    // next day. Add 24h so the comparison still makes sense.
+    if (end <= start) end += DAY_MS;
+    if (t >= start && t < end) return show;
+  }
+  return null;
+}
+
+function isHKCRStreamUrl(streamUrl) {
+  try {
+    const h = new URL(streamUrl).hostname.toLowerCase();
+    return h === 'hkcr.live' || h.endsWith('.hkcr.live');
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchHKCRMetadata({ signal } = {}) {
+  try {
+    const response = await fetchWithTimeout(
+      'https://cms.hkcr.live/schedule/current',
+      { signal },
+      4000,
+    );
+    if (!response.ok) return null;
+    const shows = await response.json();
+    const current = findCurrentHKCRShow(shows, new Date());
+    if (!current) return null;
+    const title = cleanNowPlaying(current.title);
+    if (!title || !isValidMetadata({ display: title })) return null;
+    return {
+      source: 'hkcr-schedule',
+      display: title,
+      artist: null,
+      title,
+      raw: {
+        scheduleId: current._id,
+        date: current.date,
+        startTime: current.startTime,
+        endTime: current.endTime,
+        thumbnail: current.thumbnail?.url || null,
+      },
+      confidence: 0.9,
+      cacheTtl: 60,
+    };
+  } catch (_) {
     return null;
   }
 }
@@ -1090,14 +1239,38 @@ async function fetchStationInfoFallback(station) {
 
 // Main metadata fetching function
 async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
-  // Check for HLS streams - these should be handled client-side
+  // Station-specific handlers for stations whose audio is HLS but whose
+  // now-playing data is exposed via a separate API. Must run BEFORE the
+  // generic .m3u8 bail below — otherwise these never reach their strategy.
+  if (streamUrl.includes('hkcr.live')) {
+    const parentCtrl = new AbortController();
+    const result = await Promise.race([
+      fetchHKCRMetadata({ signal: parentCtrl.signal }),
+      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]).catch(() => null);
+    try { parentCtrl.abort(); } catch (_) {}
+    if (result?.display) {
+      return {
+        source: result.source,
+        display: result.display,
+        artist: result.artist,
+        title: result.title,
+        raw: result.raw,
+        cacheTtl: result.cacheTtl || 60
+      };
+    }
+    return { ok: false, reason: 'no-metadata' };
+  }
+
+  // HLS streams without a station-specific strategy — let the client handle
+  // (hls.js parses ID3 timed metadata locally for stations that ship it).
   if (streamUrl.includes('.m3u8')) {
     return {
       ok: false,
       reason: 'hls-client'
     };
   }
-  
+
   const station = { stationId, url: streamUrl, homepage, country };
   const strategies = [];
 
@@ -1310,4 +1483,5 @@ module.exports = {
   decodeIcyBytes,
   selectBestResult,
   firstNonNullResult,
+  findCurrentHKCRShow,
 };

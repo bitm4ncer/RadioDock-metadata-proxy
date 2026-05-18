@@ -8,6 +8,7 @@ const {
   isValidMetadata,
   isPlaceholder,
   decodeIcyBytes,
+  findCurrentHKCRShow,
 } = require('../strategies/index.js');
 
 test('cleanNowPlaying: empty / non-string returns empty string', () => {
@@ -141,4 +142,76 @@ test('decodeIcyBytes: falls back to latin1 when utf8 produces U+FFFD', () => {
   const out = decodeIcyBytes(bytes);
   assert.equal(out.includes('�'), false, 'must not contain replacement char');
   assert.equal(out, 'Beyoncé');
+});
+
+// --- HKCR schedule matching (Asia/Hong_Kong, UTC+8) ---
+// HKCR shows are stored as { date: "YYYY-MM-DD", startTime: "HH:MM",
+// endTime: "HH:MM", title, ... } in HK local time. findCurrentHKCRShow
+// must pick the entry whose [start, end) window contains `now`.
+
+// 21:30 HK on 2026-05-18 = 13:30 UTC
+const HK_2030_NOW = new Date(Date.UTC(2026, 4, 18, 13, 30));
+
+test('findCurrentHKCRShow: picks the show whose HK window contains now', () => {
+  const shows = [
+    { title: 'bluebubble with nefo', date: '2026-05-18', startTime: '21:00', endTime: '22:00' },
+    { title: 'next show', date: '2026-05-18', startTime: '22:00', endTime: '23:00' },
+  ];
+  const hit = findCurrentHKCRShow(shows, HK_2030_NOW);
+  assert.equal(hit?.title, 'bluebubble with nefo');
+});
+
+test('findCurrentHKCRShow: returns null when no show is airing', () => {
+  const shows = [
+    { title: 'earlier', date: '2026-05-18', startTime: '10:00', endTime: '11:00' },
+    { title: 'later', date: '2026-05-19', startTime: '21:00', endTime: '22:00' },
+  ];
+  assert.equal(findCurrentHKCRShow(shows, HK_2030_NOW), null);
+});
+
+test('findCurrentHKCRShow: skips cancelled shows', () => {
+  const shows = [
+    {
+      title: 'bluebubble with nefo',
+      date: '2026-05-18', startTime: '21:00', endTime: '22:00',
+      cancelledAt: '2026-05-17T10:00:00Z',
+    },
+  ];
+  assert.equal(findCurrentHKCRShow(shows, HK_2030_NOW), null);
+});
+
+test('findCurrentHKCRShow: handles midnight-crossing windows', () => {
+  // Show 23:00 → 01:00 (HK), now = 00:30 HK on 2026-05-19 = 16:30 UTC on 2026-05-18.
+  const shows = [
+    { title: 'late night', date: '2026-05-18', startTime: '23:00', endTime: '01:00' },
+  ];
+  const nowAtMidnightPlus30 = new Date(Date.UTC(2026, 4, 18, 16, 30));
+  const hit = findCurrentHKCRShow(shows, nowAtMidnightPlus30);
+  assert.equal(hit?.title, 'late night');
+});
+
+test('findCurrentHKCRShow: end boundary is exclusive', () => {
+  // Show 21:00→22:00 HK. now = exactly 22:00 HK = 14:00 UTC.
+  const shows = [
+    { title: 'edge', date: '2026-05-18', startTime: '21:00', endTime: '22:00' },
+  ];
+  const atEnd = new Date(Date.UTC(2026, 4, 18, 14, 0));
+  assert.equal(findCurrentHKCRShow(shows, atEnd), null);
+});
+
+test('findCurrentHKCRShow: malformed entries are skipped, not thrown', () => {
+  const shows = [
+    null,
+    {},
+    { title: '', date: '2026-05-18', startTime: '21:00', endTime: '22:00' },
+    { title: 'ok', date: 'bogus', startTime: 'x:y', endTime: 'z' },
+    { title: 'bluebubble with nefo', date: '2026-05-18', startTime: '21:00', endTime: '22:00' },
+  ];
+  assert.equal(findCurrentHKCRShow(shows, HK_2030_NOW)?.title, 'bluebubble with nefo');
+});
+
+test('findCurrentHKCRShow: non-array input returns null', () => {
+  assert.equal(findCurrentHKCRShow(null), null);
+  assert.equal(findCurrentHKCRShow(undefined), null);
+  assert.equal(findCurrentHKCRShow({}), null);
 });
