@@ -531,11 +531,19 @@ async function fetchICYMetadata(streamUrl) {
       
       if (icyName && icyName !== icyDescription) {
         const filtered = icyName.toLowerCase();
-        const unwantedPatterns = ['unknown', 'untitled', 'live', 'stream', 'radio'];
-        const isGeneric = unwantedPatterns.some(pattern => 
-          filtered === pattern || (filtered.length < 15 && filtered.includes(pattern))
+        // Keep this list in sync with the in-stream branch below and with
+        // isValidMetadata(). The icy-name header is often a station default
+        // ("Airtime!", "AzuraCast", "Liquidsoap"), so the placeholder check
+        // matters most here.
+        const unwantedPatterns = [
+          'unknown', 'untitled', 'live', 'on-air', 'radio', 'stream',
+          'broadcasting', 'music', 'live stream', 'internet radio',
+          'online radio', 'web radio', 'digital radio', 'airtime!'
+        ];
+        const isGeneric = isPlaceholder(icyName) || unwantedPatterns.some(pattern =>
+          filtered === pattern || (filtered.length < 20 && filtered.includes(pattern))
         );
-        
+
         if (!isGeneric && icyName.length > 3) {
           return {
             source: 'icy-headers',
