@@ -469,15 +469,27 @@ function deriveAirtimeProEndpointFromStream(streamUrl) {
   try {
     if (!streamUrl) return null;
     const u = new URL(streamUrl);
-    const host = u.hostname || '';
-    // Expect pattern like: <station>.out.airtime.pro
-    const m = host.match(/^([^.]+)\.out\.airtime\.pro$/i);
-    if (!m) return null;
-    const stationKey = m[1];
-    return `https://${stationKey}.airtime.pro/api/live-info-v2`;
+    const host = (u.hostname || '').toLowerCase();
+    // <station>.out.airtime.pro  ->  <station>.airtime.pro/api/live-info-v2
+    const a = host.match(/^([^.]+)\.out\.airtime\.pro$/i);
+    if (a) return `https://${a[1]}.airtime.pro/api/live-info-v2`;
+    // Airtime Pro on streamnerd.nl. Stream URLs look like
+    //   https://origin.streamnerd.nl/<station>/<mount>/icecast.audio
+    //   https://play.streamnerd.nl/<station>/<mount>/playlist.m3u8
+    // and the Airtime API lives at <station>.streamnerd.nl/api/live-info-v2
+    // (verified for Operator Radio: operator.streamnerd.nl/api/live-info-v2).
+    if (host === 'origin.streamnerd.nl' || host === 'play.streamnerd.nl') {
+      const seg = u.pathname.split('/').filter(Boolean)[0];
+      if (seg) return `https://${seg}.streamnerd.nl/api/live-info-v2`;
+    }
+    return null;
   } catch (e) {
     return null;
   }
+}
+
+function isAirtimeProStreamUrl(streamUrl) {
+  return !!deriveAirtimeProEndpointFromStream(streamUrl);
 }
 
 function parseAirtimeProNowPlaying(data) {
@@ -1449,7 +1461,7 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
 
     if (streamUrl.includes('cashmereradio.airtime.pro')) {
       strategies.push(() => fetchCashmereMetadata(opts));
-    } else if (streamUrl.includes('.out.airtime.pro')) {
+    } else if (isAirtimeProStreamUrl(streamUrl)) {
       strategies.push(() => fetchAirtimeProMetadata(streamUrl, undefined, opts));
     }
 
