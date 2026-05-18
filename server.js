@@ -465,20 +465,32 @@ app.get('/v1/metadata', async (req, res) => {
       ]);
     });
 
-    // Surface the SSRF block from undici's safe lookup as a clean reason code
-    // instead of a generic upstream-error.
-    if (result && result.ok === false && result.reason === 'invalid-host') {
-      const blocked = {
+    // Pass-through for any explicit failure reason from fetchMetadata —
+    // including hls-client (so the client falls back to local hls.js ID3),
+    // invalid-host (SSRF block), no-metadata, etc. Without this branch we
+    // would wrap an ok:false result as ok:true with an empty display, which
+    // hides the failure reason from the client.
+    if (result && result.ok === false && result.reason) {
+      const reasonTtl = {
+        'invalid-host': 60,
+        'hls-client': 10,
+        'no-metadata': 30,
+      };
+      const errResponse = {
         ok: false,
         stationId: stationId || null,
         streamUrl,
-        reason: 'invalid-host',
-        message: 'Refusing to fetch private or loopback address',
+        reason: result.reason,
+        message: result.message || (result.reason === 'invalid-host'
+          ? 'Refusing to fetch private or loopback address'
+          : result.reason === 'hls-client'
+            ? 'HLS streams should be handled client-side'
+            : 'No metadata available'),
         fetchedAt,
-        cacheTtl: 60,
+        cacheTtl: reasonTtl[result.reason] ?? 10,
       };
-      cache.set(cacheKey, blocked, { ttl: 60 * 1000 });
-      return res.json(blocked);
+      cache.set(cacheKey, errResponse, { ttl: errResponse.cacheTtl * 1000 });
+      return res.json(errResponse);
     }
 
     const response = {
