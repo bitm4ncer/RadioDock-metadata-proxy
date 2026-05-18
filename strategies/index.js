@@ -22,11 +22,12 @@
  */
 
 const { request } = require('undici');
-const icy = require('icy');
+const { readBoundedBody } = require('../lib/safe-fetch.js');
 
 // Timeout configuration - reduced for better responsiveness
 const DEFAULT_TIMEOUT = 6000;
 const FAST_TIMEOUT = 2500;
+const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB cap on any single upstream body
 
 // Shared normalization for now playing strings
 function cleanNowPlaying(text) {
@@ -75,8 +76,14 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
       status: response.statusCode,
       statusCode: response.statusCode,
       headers: response.headers,
-      json: async () => JSON.parse(await response.body.text()),
-      text: async () => response.body.text(),
+      json: async () => {
+        const buf = await readBoundedBody(response.body, MAX_RESPONSE_BYTES);
+        return JSON.parse(buf.toString('utf8'));
+      },
+      text: async () => {
+        const buf = await readBoundedBody(response.body, MAX_RESPONSE_BYTES);
+        return buf.toString('utf8');
+      },
       body: response.body
     };
   } catch (error) {
@@ -85,26 +92,82 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
   }
 }
 
+// Exact-match placeholder strings that various streaming server defaults emit
+// when no real track metadata is configured. Centova Cast ships with the
+// literal "Now Playing info goes here", AzuraCast falls back to "Stream
+// Offline", Liquidsoap to "Default", etc. These never carry useful info and
+// would otherwise leak straight into the UI.
+const PLACEHOLDER_STRINGS = new Set([
+  'now playing info goes here',
+  'now playing',
+  'now playing info',
+  'stream offline',
+  'no track information',
+  'no info available',
+  'no metadata available',
+  'azuracast',
+  'liquidsoap',
+  'default',
+  'unspecified description',
+  'sam broadcaster',
+  'sam broadcaster pro',
+  'your dj here',
+  'dj name',
+  'station name',
+  'track title',
+  'artist - title',
+  'artist name',
+  'this is your station',
+  'mountpoint',
+  'mountpoint /stream',
+  'description',
+]);
+
+function isPlaceholder(text) {
+  const t = String(text || '').toLowerCase().trim();
+  if (PLACEHOLDER_STRINGS.has(t)) return true;
+  if (/^welcome to\b/.test(t)) return true;
+  return false;
+}
+
+// ICY metadata blocks are not encoding-tagged. The spec leaves charset up to
+// the broadcaster, and in practice German/French/Scandinavian stations often
+// emit Windows-1252 or ISO-8859-1, which produce U+FFFD replacement chars
+// when decoded as UTF-8. Strategy: decode as UTF-8 first; if the result
+// contains a replacement character, retry as latin1. Latin1 maps 1:1 to the
+// first 256 code points so it never produces replacements — at worst it
+// shows the wrong glyph, which is still less broken than `Beyonc�`.
+function decodeIcyBytes(bytes) {
+  const buf = bytes instanceof Buffer
+    ? bytes
+    : Buffer.from(bytes.buffer || bytes, bytes.byteOffset || 0, bytes.length);
+  const utf8 = buf.toString('utf8').replace(/\0/g, '');
+  if (!utf8.includes('�')) return utf8;
+  return buf.toString('latin1').replace(/\0/g, '');
+}
+
 // Common metadata validation and filtering
 function isValidMetadata(metadata) {
   if (!metadata || !metadata.display || typeof metadata.display !== 'string') {
     return false;
   }
-  
+
   const text = metadata.display.toLowerCase().trim();
   if (text.length < 3) return false;
-  
+
+  if (isPlaceholder(text)) return false;
+
   // Filter out common generic/unhelpful metadata
   const unwantedPatterns = [
     'unknown', 'untitled', 'live', 'on-air', 'stream', 'radio',
     'broadcasting', 'music', 'live stream', 'internet radio',
     'online radio', 'web radio', 'digital radio', 'airtime!'
   ];
-  
-  const isGeneric = unwantedPatterns.some(pattern => 
+
+  const isGeneric = unwantedPatterns.some(pattern =>
     text === pattern || (text.length < 20 && text.includes(pattern))
   );
-  
+
   return !isGeneric;
 }
 
@@ -514,8 +577,8 @@ async function fetchICYMetadata(streamUrl) {
           if (metadataLength > 0 && buffer.length >= icyMetaInt + 1 + metadataLength) {
             // Extract metadata block
             const metadataBytes = buffer.slice(icyMetaInt + 1, icyMetaInt + 1 + metadataLength);
-            const metadataString = new TextDecoder().decode(metadataBytes).replace(/\0/g, '');
-            
+            const metadataString = decodeIcyBytes(metadataBytes);
+
             // Parse StreamTitle from metadata
             const streamTitleMatch = metadataString.match(/StreamTitle='([^']*)'/);
             if (streamTitleMatch && streamTitleMatch[1]) {
@@ -541,12 +604,12 @@ async function fetchICYMetadata(streamUrl) {
         'broadcasting', 'music', 'live stream', 'internet radio',
         'online radio', 'web radio', 'digital radio'
       ];
-      
-      const isGeneric = unwantedPatterns.some(pattern => 
-        filtered === pattern || 
+
+      const isGeneric = isPlaceholder(metadataFound) || unwantedPatterns.some(pattern =>
+        filtered === pattern ||
         (filtered.length < 20 && filtered.includes(pattern))
       );
-      
+
       if (!isGeneric && metadataFound.length > 3) {
         // Try to split artist and title
         let artist = null;

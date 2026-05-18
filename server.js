@@ -4,10 +4,22 @@ const pino = require('pino');
 const { LRUCache } = require('lru-cache');
 const { request } = require('undici');
 const { fetchMetadata } = require('./strategies/index.js');
+const { installSafeDispatcher, isHostnameLiteralPrivate } = require('./lib/safe-fetch.js');
+const { createSingleFlight } = require('./lib/single-flight.js');
+
+// Install SSRF-safe global undici dispatcher BEFORE anything else issues
+// outbound requests. Every `request()` call — including those inside
+// strategies/index.js — now resolves DNS through safeLookup and refuses to
+// connect to private/loopback addresses.
+installSafeDispatcher();
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', true); // Render terminates TLS upstream; req.ip needs this to reflect the real client.
 const port = process.env.PORT || 3000;
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+const singleFlight = createSingleFlight();
 
 // Timeout configuration
 const DEFAULT_TIMEOUT = 6000;
@@ -25,7 +37,7 @@ const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
 const RATE_LIMIT_MAX_REQUESTS = 120; // max requests per window per IP
 
 function rateLimit(req, res, next) {
-  const clientId = req.ip || req.connection.remoteAddress;
+  const clientId = req.ip || req.socket?.remoteAddress;
   const now = Date.now();
   
   if (!rateLimitMap.has(clientId)) {
@@ -176,10 +188,13 @@ function validateMetadataRequest(query) {
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       return { valid: false, error: 'Invalid URL scheme (only http/https allowed)' };
     }
+    if (isHostnameLiteralPrivate(parsedUrl.hostname)) {
+      return { valid: false, error: 'Refusing to fetch private or loopback address', reason: 'invalid-host' };
+    }
   } catch (e) {
     return { valid: false, error: 'Invalid URL format' };
   }
-  
+
   // Validate optional parameters
   if (stationId && (typeof stationId !== 'string' || stationId.length > 100)) {
     return { valid: false, error: 'Invalid stationId' };
@@ -223,7 +238,10 @@ function validatePlaylistRequest(query) {
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       return { valid: false, error: 'Invalid URL scheme (only http/https allowed)' };
     }
-    
+    if (isHostnameLiteralPrivate(parsedUrl.hostname)) {
+      return { valid: false, error: 'Refusing to fetch private or loopback address', reason: 'invalid-host' };
+    }
+
     // Additional validation for playlist files
     const isM3U = url.toLowerCase().includes('.m3u');
     const isPLS = url.toLowerCase().includes('.pls');
@@ -411,13 +429,13 @@ app.get('/v1/metadata', async (req, res) => {
       ok: false,
       stationId: stationId || null,
       streamUrl: streamUrl || '',
-      reason: 'invalid-url',
+      reason: validation.reason || 'invalid-url',
       message: validation.error,
       fetchedAt,
       cacheTtl: 10
     });
   }
-  
+
   // Check if URL looks like HLS
   if (streamUrl.includes('.m3u8')) {
     return res.json({
@@ -442,22 +460,34 @@ app.get('/v1/metadata', async (req, res) => {
   }
   
   try {
-    // Add overall timeout for metadata fetching
-    const fetchTimeout = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('TIMEOUT')), 12000); // 12 second global timeout
+    // Collapse concurrent identical requests into one outbound work unit so a
+    // popular station with N listeners only triggers one strategy fan-out.
+    const result = await singleFlight(cacheKey, async () => {
+      const fetchTimeout = new Promise((_, reject) => {
+        setTimeout(() => reject(Object.assign(new Error('TIMEOUT'), { code: 'TIMEOUT' })), 12000);
+      });
+      return Promise.race([
+        fetchMetadata({ streamUrl, stationId, homepage, country }),
+        fetchTimeout,
+      ]);
     });
-    
-    // Fetch metadata using strategies with race condition
-    const result = await Promise.race([
-      fetchMetadata({
+
+    // Surface the SSRF block from undici's safe lookup as a clean reason code
+    // instead of a generic upstream-error.
+    if (result && result.ok === false && result.reason === 'invalid-host') {
+      const blocked = {
+        ok: false,
+        stationId: stationId || null,
         streamUrl,
-        stationId,
-        homepage,
-        country
-      }),
-      fetchTimeout
-    ]);
-    
+        reason: 'invalid-host',
+        message: 'Refusing to fetch private or loopback address',
+        fetchedAt,
+        cacheTtl: 60,
+      };
+      cache.set(cacheKey, blocked, { ttl: 60 * 1000 });
+      return res.json(blocked);
+    }
+
     const response = {
       ok: true,
       stationId: stationId || null,
@@ -489,16 +519,23 @@ app.get('/v1/metadata', async (req, res) => {
       stack: error.stack,
     }, 'Metadata fetch failed');
     
+    let reason = 'upstream-error';
+    if (error.code === 'TIMEOUT') reason = 'timeout';
+    else if (error.code === 'SSRF_BLOCKED') reason = 'invalid-host';
+    else if (error.code === 'BODY_TOO_LARGE') reason = 'upstream-too-large';
+
     const errorResponse = {
       ok: false,
       stationId: stationId || null,
       streamUrl,
-      reason: error.code === 'TIMEOUT' ? 'timeout' : 'upstream-error',
-      message: error.message || 'Failed to fetch metadata',
+      reason,
+      message: reason === 'invalid-host'
+        ? 'Refusing to fetch private or loopback address'
+        : (error.message || 'Failed to fetch metadata'),
       fetchedAt,
-      cacheTtl: 10
+      cacheTtl: reason === 'invalid-host' ? 60 : 10,
     };
-    
+
     res.json(errorResponse);
   }
 });
@@ -513,6 +550,7 @@ app.get('/v1/playlist', async (req, res) => {
   if (!validation.valid) {
     return res.json({
       success: false,
+      reason: validation.reason || 'invalid-url',
       error: validation.error,
       fetchedAt,
       cacheTtl: 10
