@@ -29,23 +29,49 @@ const DEFAULT_TIMEOUT = 6000;
 const FAST_TIMEOUT = 2500;
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB cap on any single upstream body
 
-// Shared normalization for now playing strings
+// Shared normalization for now playing strings. Goal: produce a single
+// canonical form so downstream `display === stationName` and `text.includes(
+// " - ")` checks work regardless of which upstream the metadata came from.
 function cleanNowPlaying(text) {
   try {
     if (!text) return '';
     let s = String(text).trim();
-    
-    // Decode HTML entities
+
+    // Unicode normalisation. NFC collapses decomposed sequences (é -> é)
+    // which otherwise break a string-length-based comparison and produce
+    // surprising substring matches.
+    try { s = s.normalize('NFC'); } catch (e) { /* very old runtime, skip */ }
+
+    // Decode HTML entities (numeric + named, common subset)
     s = s.replace(/&amp;/g, '&')
          .replace(/&lt;/g, '<')
          .replace(/&gt;/g, '>')
          .replace(/&quot;/g, '"')
+         .replace(/&apos;/g, "'")
          .replace(/&#039;/g, "'")
          .replace(/&#x27;/g, "'")
-         .replace(/&#0*39;/g, "'");
-    
-    // Remove a leading dash variant like "- ", "– ", "— " (with optional leading spaces)
-    s = s.replace(/^\s*[-–—]\s+/, '');
+         .replace(/&#0*39;/g, "'")
+         .replace(/&nbsp;/g, ' ');
+
+    // Strip zero-width characters that some encoders inject (ZWSP, ZWNJ,
+    // ZWJ, LRM/RLM, BOM). These would otherwise appear in the UI as
+    // invisible-but-present chars and break split-by-' - '.
+    s = s.replace(/[​-‏﻿]/g, '');
+
+    // Normalise en-dash / em-dash / minus / non-breaking hyphen to the ASCII
+    // hyphen when they're used as a visible artist/title separator. We only
+    // touch the " <dash> " pattern (whitespace on both sides); we don't want
+    // to mangle a single-word "Café–Society" title that uses an en-dash as a
+    // proper punctuation mark.
+    s = s.replace(/\s+[‐-―−]\s+/g, ' - ');
+
+    // Collapse repeated whitespace introduced by the above (or by upstream)
+    // so "Artist   -   Title" lands as "Artist - Title".
+    s = s.replace(/\s{2,}/g, ' ');
+
+    // Remove a leading dash of any flavour, with optional leading spaces.
+    s = s.replace(/^\s*[-‐-―−]\s+/, '');
+
     return s.trim();
   } catch (e) {
     return typeof text === 'string' ? text.trim() : '';
@@ -146,29 +172,31 @@ function decodeIcyBytes(bytes) {
   return buf.toString('latin1').replace(/\0/g, '');
 }
 
-// Common metadata validation and filtering
+// Exact-match junk list. Single source of truth used by isValidMetadata()
+// and by the inline branches in fetchICYMetadata() / fetchIcecastMetadata().
+// Exact-match only (after lowercase + trim) — a substring check would
+// incorrectly drop legitimate titles like "Coldplay Live" or station names
+// like "Live FM" that happen to contain a junk word.
+const JUNK_EXACT = new Set([
+  'unknown', 'untitled', 'live', 'on-air', 'stream', 'radio',
+  'broadcasting', 'music', 'live stream', 'internet radio',
+  'online radio', 'web radio', 'digital radio', 'airtime!',
+  'unspecified', 'no name', 'no info', 'no data',
+]);
+
+function isJunkExact(text) {
+  return JUNK_EXACT.has(String(text || '').toLowerCase().trim());
+}
+
 function isValidMetadata(metadata) {
   if (!metadata || !metadata.display || typeof metadata.display !== 'string') {
     return false;
   }
-
   const text = metadata.display.toLowerCase().trim();
   if (text.length < 3) return false;
-
   if (isPlaceholder(text)) return false;
-
-  // Filter out common generic/unhelpful metadata
-  const unwantedPatterns = [
-    'unknown', 'untitled', 'live', 'on-air', 'stream', 'radio',
-    'broadcasting', 'music', 'live stream', 'internet radio',
-    'online radio', 'web radio', 'digital radio', 'airtime!'
-  ];
-
-  const isGeneric = unwantedPatterns.some(pattern =>
-    text === pattern || (text.length < 20 && text.includes(pattern))
-  );
-
-  return !isGeneric;
+  if (isJunkExact(text)) return false;
+  return true;
 }
 
 // Parse artist and title from various formats
@@ -607,13 +635,8 @@ async function fetchIcecastMetadata(endpoints, mount) {
           else if (parsedTitle) nowPlaying = parsedTitle;
           else if (parsedArtist) nowPlaying = parsedArtist;
 
-          if (nowPlaying && nowPlaying.length > 3) {
-            const filtered = nowPlaying.toLowerCase();
-            const unwantedPatterns = ['unknown', 'untitled', 'live', 'on-air', 'stream', 'radio'];
-            const isGeneric = unwantedPatterns.some(pattern =>
-              filtered === pattern || (filtered.length < 15 && filtered.includes(pattern))
-            );
-            if (!isGeneric) {
+          if (nowPlaying && isValidMetadata({ display: nowPlaying })) {
+            {
               return {
                 source: 'icecast-status',
                 display: nowPlaying,
@@ -664,22 +687,8 @@ async function fetchICYMetadata(streamUrl) {
       const icyDescription = response.headers['icy-description'];
       
       
-      if (icyName && icyName !== icyDescription) {
-        const filtered = icyName.toLowerCase();
-        // Keep this list in sync with the in-stream branch below and with
-        // isValidMetadata(). The icy-name header is often a station default
-        // ("Airtime!", "AzuraCast", "Liquidsoap"), so the placeholder check
-        // matters most here.
-        const unwantedPatterns = [
-          'unknown', 'untitled', 'live', 'on-air', 'radio', 'stream',
-          'broadcasting', 'music', 'live stream', 'internet radio',
-          'online radio', 'web radio', 'digital radio', 'airtime!'
-        ];
-        const isGeneric = isPlaceholder(icyName) || unwantedPatterns.some(pattern =>
-          filtered === pattern || (filtered.length < 20 && filtered.includes(pattern))
-        );
-
-        if (!isGeneric && icyName.length > 3) {
+      if (icyName && icyName !== icyDescription && isValidMetadata({ display: icyName })) {
+        {
           return {
             source: 'icy-headers',
             display: cleanNowPlaying(icyName),
@@ -739,21 +748,9 @@ async function fetchICYMetadata(streamUrl) {
     } catch (streamError) {
     }
     
-    // Filter out generic/unhelpful metadata (same logic as old version)
-    if (metadataFound && metadataFound.length > 0) {
-      const filtered = metadataFound.toLowerCase();
-      const unwantedPatterns = [
-        'unknown', 'airtime!', 'live', 'on-air', 'radio', 'stream',
-        'broadcasting', 'music', 'live stream', 'internet radio',
-        'online radio', 'web radio', 'digital radio'
-      ];
-
-      const isGeneric = isPlaceholder(metadataFound) || unwantedPatterns.some(pattern =>
-        filtered === pattern ||
-        (filtered.length < 20 && filtered.includes(pattern))
-      );
-
-      if (!isGeneric && metadataFound.length > 3) {
+    // Filter out generic/unhelpful metadata using the central junk list.
+    if (metadataFound && isValidMetadata({ display: metadataFound })) {
+      {
         // Try to split artist and title
         let artist = null;
         let title = null;
