@@ -436,19 +436,12 @@ app.get('/v1/metadata', async (req, res) => {
     });
   }
 
-  // Check if URL looks like HLS
-  if (streamUrl.includes('.m3u8')) {
-    return res.json({
-      ok: false,
-      stationId: stationId || null,
-      streamUrl,
-      reason: 'hls-client',
-      message: 'HLS streams should be handled client-side',
-      fetchedAt,
-      cacheTtl: 10
-    });
-  }
-  
+  // NB: we used to short-circuit `.m3u8` URLs to `reason: 'hls-client'`
+  // here. Now station-specific schedule strategies (e.g. HKCR) can produce
+  // useful metadata for HLS streams, so we delegate the HLS gate to
+  // fetchMetadata() — it still bounces `.m3u8` with `hls-client` for any
+  // stream that doesn't match a schedule-aware strategy.
+
   // Generate cache key
   const cacheKey = `${streamUrl}|${stationId || ''}|${homepage || ''}|${country || ''}`;
   
