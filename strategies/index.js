@@ -32,6 +32,15 @@ const { readBoundedBody } = require('../lib/safe-fetch.js');
 const probeCache = require('../lib/probe-cache.js');
 const { cleanNowPlaying, isPlaceholder, isValidMetadata } = require('../lib/normalize.js');
 const { findStationMapEntry, parseByKind, CACHE_TTL_BY_KIND, HTML_KINDS } = require('./station-map.js');
+const { makeOverrideMap } = require('../lib/override-map.js');
+
+// Curated per-station override map, fetched from the PWA-published JSON. Both
+// proxy instances consume it; degrades to empty on any failure. start() is
+// called from server.js at boot (kept side-effect-free here for tests).
+const overrideMap = makeOverrideMap({
+  url: process.env.OVERRIDE_MAP_URL || 'https://radiodock.app/public/metadata-overrides.json',
+  ttlMs: Number(process.env.OVERRIDE_MAP_TTL_MS) || 300000,
+});
 
 // Timeout configuration - reduced for better responsiveness
 const DEFAULT_TIMEOUT = 6000;
@@ -1492,6 +1501,75 @@ async function fetchStationInfoFallback(station) {
 }
 
 // Main metadata fetching function
+// Resolves "a.b.0.c" against a parsed object. When a segment lands on an array
+// and the key is non-numeric, scans for the first element resolving the rest
+// (Icecast `source[]`, KEXP `results[]`, …).
+function resolvePath(obj, pathStr) {
+  if (!pathStr) return undefined;
+  const parts = String(pathStr).split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length; i++) {
+    if (cur == null) return undefined;
+    const key = parts[i];
+    if (Array.isArray(cur)) {
+      if (/^\d+$/.test(key)) {
+        cur = cur[Number(key)];
+      } else {
+        const rest = parts.slice(i).join('.');
+        for (const el of cur) {
+          const v = resolvePath(el, rest);
+          if (v !== undefined && v !== null && v !== '') return v;
+        }
+        return undefined;
+      }
+    } else {
+      cur = cur[key];
+    }
+  }
+  return cur;
+}
+
+function cleanField(v) {
+  if (v === undefined || v === null) return '';
+  return String(v).trim();
+}
+
+// Pure: parsed JSON + {artist,title,show} field paths → {display,artist,title}
+// or null (after the shared placeholder/junk gate).
+function resolveJsonGeneric(data, mapping = {}) {
+  const artist = cleanField(resolvePath(data, mapping.artist));
+  const title = cleanField(resolvePath(data, mapping.title));
+  const show = cleanField(resolvePath(data, mapping.show));
+  const display = (artist && title) ? `${artist} - ${title}` : (title || artist || show || '');
+  const cleaned = cleanNowPlaying(display);
+  if (!cleaned || !isValidMetadata({ display: cleaned })) return null;
+  return { display: cleaned, artist: artist || null, title: title || null };
+}
+
+// Runs a published override entry. Bespoke kinds reuse the station-map parsers
+// (JSON or HTML); json-generic uses the field-path resolver. Curated overrides
+// carry high confidence so they win the selection.
+async function resolveOverride(entry, streamUrl, { signal } = {}) {
+  if (!entry || entry.strategy === 'none') return null;
+  if (entry.strategy !== 'json-generic') {
+    const r = await fetchStationMapMetadata(
+      { kind: entry.strategy, infoUrl: entry.endpoint, station: '(override)' }, streamUrl, { signal });
+    if (r) {
+      r.source = `override-${entry.strategy}`;
+      r.confidence = 0.98;
+      if (entry.ttl) r.cacheTtl = entry.ttl;
+    }
+    return r;
+  }
+  if (!entry.endpoint) return null;
+  const response = await fetchWithTimeout(entry.endpoint, { signal }, 5000);
+  if (!response.ok) return null;
+  const data = await response.json();
+  const parsed = resolveJsonGeneric(data, entry.mapping || {});
+  if (!parsed) return null;
+  return { source: 'override-json-generic', ...parsed, raw: { endpoint: entry.endpoint }, confidence: 0.98, cacheTtl: entry.ttl || 15 };
+}
+
 async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
   // Station-specific handlers for stations whose audio is HLS but whose
   // now-playing data is exposed via a separate API. Must run BEFORE the
@@ -1524,6 +1602,38 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
       };
     }
     return { ok: false, reason: 'no-metadata' };
+  }
+
+  // Curated per-station override (published metadata-overrides.json). Resolved
+  // BEFORE the HLS bail so an override endpoint can serve HLS-audio stations,
+  // and before the probe chain so a curated config always wins. `none`
+  // deliberately suppresses garbage metadata; `exclusive` skips the probe
+  // chain entirely on a miss.
+  const overrideEntry = overrideMap.lookup({ stationId, streamUrl });
+  if (overrideEntry && overrideEntry.strategy === 'none') {
+    return { ok: false, reason: 'suppressed' };
+  }
+  if (overrideEntry) {
+    const ovCtrl = new AbortController();
+    const only = await Promise.race([
+      resolveOverride(overrideEntry, streamUrl, { signal: ovCtrl.signal }),
+      new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]).catch(() => null);
+    try { ovCtrl.abort(); } catch (_) {}
+    if (only?.display) {
+      return {
+        source: only.source,
+        display: only.display,
+        artist: only.artist,
+        title: only.title,
+        raw: only.raw,
+        cacheTtl: only.cacheTtl || 15,
+      };
+    }
+    if (overrideEntry.exclusive) {
+      return { ok: false, reason: 'no-metadata' };
+    }
+    // non-exclusive miss → fall through to the normal probe chain
   }
 
   // HLS streams without a station-specific strategy — let the client handle
@@ -1776,4 +1886,7 @@ module.exports = {
   findNTSMixtape,
   parseAzuraCastNowPlaying,
   parseAirtimeProNowPlaying,
+  resolvePath,
+  resolveJsonGeneric,
+  overrideMap,
 };
