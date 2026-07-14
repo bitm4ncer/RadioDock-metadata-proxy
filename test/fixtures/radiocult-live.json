@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "result": {
+    "status": "schedule",
+    "content": {
+      "entity": "SCHEDULE_ENTITY",
+      "startDateUtc": "2026-07-08T23:00:00.000Z",
+      "timezone": "Europe/London",
+      "stationId": "noods-radio",
+      "media": {
+        "type": "playlist",
+        "playlistId": "2sGPgoVgW5u0Njsj9yHoz8wIGac"
+      },
+      "created": "2026-07-05T12:56:19.766Z",
+      "color": "#FFC400",
+      "exceptions": null,
+      "id": "0dff47b6-59ea-404b-9812-2a4116b23e27",
+      "title": "Repeats",
+      "duration": 540,
+      "modified": "2026-07-06T14:53:22.940Z",
+      "endDateUtc": "2026-07-09T08:00:00.000Z",
+      "isRecurring": false,
+      "doRecord": false,
+      "originalId": "0dff47b6-59ea-404b-9812-2a4116b23e27",
+      "start": "2026-07-08T23:00:00.000Z",
+      "end": "2026-07-09T08:00:00.000Z",
+      "scheduleRangeStartUtc": "2026-07-08T23:00:00.000Z",
+      "scheduleRangeEndUtc": "2026-07-09T08:00:00.000Z"
+    },
+    "metadata": {
+      "title": "Through The Years New Age w Mica",
+      "filename": "Through The Years New Age w Mica.mp3",
+      "duration": 3607.8,
+      "album": null,
+      "artist": null,
+      "playoutStartUnixTimestamp": 1783551607,
+      "playoutStartIsoTimestamp": "2026-07-08T23:00:07.000Z"
+    }
+  }
+}

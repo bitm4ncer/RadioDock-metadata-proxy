@@ -7,15 +7,21 @@
  * 
  * Strategy Types Implemented:
  * 1. NTS Radio API - Live channel metadata from nts.live API
- * 2. Airtime Pro - Generic Airtime Pro stations using live-info-v2 API
- * 3. Cashmere Radio - Specific Airtime Pro instance with custom handling
- * 4. Icecast Status - JSON status endpoints (status-json.xsl, status.json, etc.)
- * 5. ICY Metadata - Stream metadata blocks with Icy-MetaData headers
- * 6. Generic APIs - Common station API patterns and endpoints
- * 7. Radio King - radioking.com specific API endpoints
- * 8. Callshop Radio - Custom JSON status endpoint
- * 9. Radio Browser - Fallback using radio-browser.info station data
- * 10. Station Info - Last resort using station name/info
+ * 2. NTS Mixtapes - Themed mixtape channels via nts.live mixtapes API
+ * 3. Airtime Pro - Generic Airtime Pro stations using live-info-v2 API
+ * 4. Cashmere Radio - Specific Airtime Pro instance with custom handling
+ * 5. RadioCult - Derived from <slug>.radiocult.fm stream subdomains
+ * 6. RadioJar - Derived from stream.radiojar.com stream ids
+ * 7. Icecast Status - JSON status endpoints (status-json.xsl, status.json, etc.)
+ * 8. ICY Metadata - Stream metadata blocks with Icy-MetaData headers
+ * 9. Generic APIs - Common station API patterns and endpoints
+ * 10. Radio King - radioking.com specific API endpoints
+ * 11. Callshop Radio - Custom JSON status endpoint
+ * 12. Station Map - Curated per-station APIs on foreign hosts
+ *     (Creek, KEXP, BFF.fm, CKUT, WNYU, Airtime v1/LibreTime, ...)
+ *     — see strategies/station-map.js
+ * 13. Radio Browser - Fallback using radio-browser.info station data
+ * 14. Station Info - Last resort using station name/info
  * 
  * HLS streams (.m3u8) are explicitly excluded and return {ok:false, reason:"hls-client"}
  * so the extension continues to handle HLS ID3 metadata locally with hls.js.
@@ -24,60 +30,16 @@
 const { request } = require('undici');
 const { readBoundedBody } = require('../lib/safe-fetch.js');
 const probeCache = require('../lib/probe-cache.js');
+const { cleanNowPlaying, isPlaceholder, isValidMetadata } = require('../lib/normalize.js');
+const { findStationMapEntry, parseByKind, CACHE_TTL_BY_KIND } = require('./station-map.js');
 
 // Timeout configuration - reduced for better responsiveness
 const DEFAULT_TIMEOUT = 6000;
 const FAST_TIMEOUT = 2500;
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB cap on any single upstream body
 
-// Shared normalization for now playing strings. Goal: produce a single
-// canonical form so downstream `display === stationName` and `text.includes(
-// " - ")` checks work regardless of which upstream the metadata came from.
-function cleanNowPlaying(text) {
-  try {
-    if (!text) return '';
-    let s = String(text).trim();
-
-    // Unicode normalisation. NFC collapses decomposed sequences (é -> é)
-    // which otherwise break a string-length-based comparison and produce
-    // surprising substring matches.
-    try { s = s.normalize('NFC'); } catch (e) { /* very old runtime, skip */ }
-
-    // Decode HTML entities (numeric + named, common subset)
-    s = s.replace(/&amp;/g, '&')
-         .replace(/&lt;/g, '<')
-         .replace(/&gt;/g, '>')
-         .replace(/&quot;/g, '"')
-         .replace(/&apos;/g, "'")
-         .replace(/&#039;/g, "'")
-         .replace(/&#x27;/g, "'")
-         .replace(/&#0*39;/g, "'")
-         .replace(/&nbsp;/g, ' ');
-
-    // Strip zero-width characters that some encoders inject (ZWSP, ZWNJ,
-    // ZWJ, LRM/RLM, BOM). These would otherwise appear in the UI as
-    // invisible-but-present chars and break split-by-' - '.
-    s = s.replace(/[​-‏﻿]/g, '');
-
-    // Normalise en-dash / em-dash / minus / non-breaking hyphen to the ASCII
-    // hyphen when they're used as a visible artist/title separator. We only
-    // touch the " <dash> " pattern (whitespace on both sides); we don't want
-    // to mangle a single-word "Café–Society" title that uses an en-dash as a
-    // proper punctuation mark.
-    s = s.replace(/\s+[‐-―−]\s+/g, ' - ');
-
-    // Collapse repeated whitespace introduced by the above (or by upstream)
-    // so "Artist   -   Title" lands as "Artist - Title".
-    s = s.replace(/\s{2,}/g, ' ');
-
-    // Remove a leading dash of any flavour, with optional leading spaces.
-    s = s.replace(/^\s*[-‐-―−]\s+/, '');
-
-    return s.trim();
-  } catch (e) {
-    return typeof text === 'string' ? text.trim() : '';
-  }
-}
+// cleanNowPlaying / isPlaceholder / isValidMetadata live in lib/normalize.js
+// (shared with strategies/station-map.js) and are re-exported below.
 
 // HTTP request utility with timeout. Accepts an optional external `signal`
 // in `options` so the caller (fetchMetadata's strategy race) can abort
@@ -133,43 +95,7 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
   }
 }
 
-// Exact-match placeholder strings that various streaming server defaults emit
-// when no real track metadata is configured. Centova Cast ships with the
-// literal "Now Playing info goes here", AzuraCast falls back to "Stream
-// Offline", Liquidsoap to "Default", etc. These never carry useful info and
-// would otherwise leak straight into the UI.
-const PLACEHOLDER_STRINGS = new Set([
-  'now playing info goes here',
-  'now playing',
-  'now playing info',
-  'stream offline',
-  'no track information',
-  'no info available',
-  'no metadata available',
-  'azuracast',
-  'liquidsoap',
-  'default',
-  'unspecified description',
-  'sam broadcaster',
-  'sam broadcaster pro',
-  'your dj here',
-  'dj name',
-  'station name',
-  'track title',
-  'artist - title',
-  'artist name',
-  'this is your station',
-  'mountpoint',
-  'mountpoint /stream',
-  'description',
-]);
 
-function isPlaceholder(text) {
-  const t = String(text || '').toLowerCase().trim();
-  if (PLACEHOLDER_STRINGS.has(t)) return true;
-  if (/^welcome to\b/.test(t)) return true;
-  return false;
-}
 
 // ICY metadata blocks are not encoding-tagged. The spec leaves charset up to
 // the broadcaster, and in practice German/French/Scandinavian stations often
@@ -177,7 +103,7 @@ function isPlaceholder(text) {
 // when decoded as UTF-8. Strategy: decode as UTF-8 first; if the result
 // contains a replacement character, retry as latin1. Latin1 maps 1:1 to the
 // first 256 code points so it never produces replacements — at worst it
-// shows the wrong glyph, which is still less broken than `Beyonc�`.
+// shows the wrong glyph, which is still less broken than `Beyonc\u{FFFD}`.
 function decodeIcyBytes(bytes) {
   const buf = bytes instanceof Buffer
     ? bytes
@@ -185,33 +111,6 @@ function decodeIcyBytes(bytes) {
   const utf8 = buf.toString('utf8').replace(/\0/g, '');
   if (!utf8.includes('�')) return utf8;
   return buf.toString('latin1').replace(/\0/g, '');
-}
-
-// Exact-match junk list. Single source of truth used by isValidMetadata()
-// and by the inline branches in fetchICYMetadata() / fetchIcecastMetadata().
-// Exact-match only (after lowercase + trim) — a substring check would
-// incorrectly drop legitimate titles like "Coldplay Live" or station names
-// like "Live FM" that happen to contain a junk word.
-const JUNK_EXACT = new Set([
-  'unknown', 'untitled', 'live', 'on-air', 'stream', 'radio',
-  'broadcasting', 'music', 'live stream', 'internet radio',
-  'online radio', 'web radio', 'digital radio', 'airtime!',
-  'unspecified', 'no name', 'no info', 'no data',
-]);
-
-function isJunkExact(text) {
-  return JUNK_EXACT.has(String(text || '').toLowerCase().trim());
-}
-
-function isValidMetadata(metadata) {
-  if (!metadata || !metadata.display || typeof metadata.display !== 'string') {
-    return false;
-  }
-  const text = metadata.display.toLowerCase().trim();
-  if (text.length < 3) return false;
-  if (isPlaceholder(text)) return false;
-  if (isJunkExact(text)) return false;
-  return true;
 }
 
 // Parse artist and title from various formats
@@ -462,6 +361,192 @@ async function fetchNTSMetadata(streamUrl, stationId, { signal } = {}) {
     console.error('NTS API fetch failed:', error);
   }
   return null;
+}
+
+// NTS mixtape channels (Poolside, 4 To The Floor, ...) stream from
+// stream-mixtape-geo.ntslive.net and carry no in-stream metadata. They are
+// static themed channels, so the "now playing" is the mixtape's own title +
+// subtitle from the public mixtapes API. Matching is by exact
+// audio_stream_endpoint — /mixtape must not match /mixtape5.
+function isNTSMixtapeStreamUrl(streamUrl) {
+  try {
+    return new URL(streamUrl).hostname.toLowerCase() === 'stream-mixtape-geo.ntslive.net';
+  } catch (_) {
+    return false;
+  }
+}
+
+function findNTSMixtape(data, streamUrl) {
+  const results = data?.results;
+  if (!Array.isArray(results)) return null;
+  let target;
+  try {
+    const u = new URL(streamUrl);
+    target = (u.origin + u.pathname).replace(/\/+$/, '').toLowerCase();
+  } catch (_) {
+    return null;
+  }
+  return results.find((m) =>
+    typeof m?.audio_stream_endpoint === 'string' &&
+    m.audio_stream_endpoint.replace(/\/+$/, '').toLowerCase() === target
+  ) || null;
+}
+
+async function fetchNTSMixtapeMetadata(streamUrl, { signal } = {}) {
+  try {
+    const response = await fetchWithTimeout('https://www.nts.live/api/v2/mixtapes', { signal }, 5000);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const mixtape = findNTSMixtape(data, streamUrl);
+    if (!mixtape) return null;
+    const title = (mixtape.title || '').trim();
+    if (!title) return null;
+    const subtitle = (mixtape.subtitle || '').trim().replace(/\.$/, '');
+    const display = cleanNowPlaying(subtitle && subtitle !== title ? `${title} - ${subtitle}` : title);
+    if (!display || !isValidMetadata({ display })) return null;
+    return {
+      source: 'nts-mixtape',
+      display,
+      artist: null,
+      title,
+      raw: { mixtape_alias: mixtape.mixtape_alias, subtitle: mixtape.subtitle },
+      confidence: 0.95,
+      // Mixtape descriptions are effectively static — cache long.
+      cacheTtl: 3600,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+// RadioCult (radiocult.fm) — platform used by Noods, Oroko, Worldwide FM,
+// n10.as, Radio Banda Larga and others. The station slug is the stream
+// subdomain and the public API is predictable from it, same pattern as the
+// Airtime Pro derivation above.
+function deriveRadioCultEndpointFromStream(streamUrl) {
+  try {
+    const host = new URL(streamUrl).hostname.toLowerCase();
+    const m = host.match(/^([^.]+)\.radiocult\.fm$/);
+    if (!m || m[1] === 'api' || m[1] === 'www') return null;
+    return `https://api.radiocult.fm/api/station/${m[1]}/schedule/live`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseRadioCultNowPlaying(data) {
+  const r = data?.result;
+  if (!r || typeof r !== 'object') return null;
+  if (r.status === 'offAir') return null;
+
+  const meta = r.metadata && typeof r.metadata === 'object' ? r.metadata : {};
+  const artist = typeof meta.artist === 'string' ? meta.artist.trim() : '';
+  const title = typeof meta.title === 'string' ? meta.title.trim() : '';
+
+  let display = '';
+  if (artist && title && artist !== title) display = `${artist} - ${title}`;
+  else if (title) display = title;
+  else if (r.content && typeof r.content === 'object' && typeof r.content.title === 'string') {
+    display = r.content.title;
+  }
+
+  display = cleanNowPlaying(display);
+  if (!display || !isValidMetadata({ display })) return null;
+  return { display, artist: artist || null, title: title || null };
+}
+
+async function fetchRadioCultMetadata(streamUrl, { signal } = {}) {
+  try {
+    const endpoint = deriveRadioCultEndpointFromStream(streamUrl);
+    if (!endpoint) return null;
+    const response = await fetchWithTimeout(endpoint, { signal }, 5000);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const parsed = parseRadioCultNowPlaying(data);
+    if (!parsed) return null;
+    return {
+      source: 'radiocult',
+      ...parsed,
+      raw: { status: data?.result?.status, show: data?.result?.content?.title ?? null },
+      confidence: 0.9,
+      cacheTtl: 30,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+// RadioJar — stream.radiojar.com/<streamId> exposes now-playing at
+// proxy.radiojar.com/api/stations/<streamId>/now_playing/. Used by Radio
+// Alhara and many others on the platform.
+function deriveRadioJarEndpointFromStream(streamUrl) {
+  try {
+    const u = new URL(streamUrl);
+    if (u.hostname.toLowerCase() !== 'stream.radiojar.com') return null;
+    const seg = u.pathname.split('/').filter(Boolean)[0];
+    if (!seg) return null;
+    return `https://proxy.radiojar.com/api/stations/${seg}/now_playing/`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseRadioJarNowPlaying(data) {
+  if (!data || typeof data !== 'object') return null;
+  const artist = typeof data.artist === 'string' ? data.artist.trim() : '';
+  const title = typeof data.title === 'string' ? data.title.trim() : '';
+
+  let display = '';
+  if (artist && title && artist !== title) display = `${artist} - ${title}`;
+  else display = title || artist;
+
+  display = cleanNowPlaying(display);
+  if (!display || !isValidMetadata({ display })) return null;
+  return { display, artist: artist || null, title: title || null };
+}
+
+async function fetchRadioJarMetadata(streamUrl, { signal } = {}) {
+  try {
+    const endpoint = deriveRadioJarEndpointFromStream(streamUrl);
+    if (!endpoint) return null;
+    const response = await fetchWithTimeout(endpoint, { signal }, 4000);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const parsed = parseRadioJarNowPlaying(data);
+    if (!parsed) return null;
+    return {
+      source: 'radiojar',
+      ...parsed,
+      raw: data,
+      confidence: 0.85,
+      cacheTtl: 15,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+// Curated station-map strategy — stations whose metadata API lives on a
+// different host than the stream (see strategies/station-map.js).
+async function fetchStationMapMetadata(entry, streamUrl, { signal } = {}) {
+  try {
+    const response = await fetchWithTimeout(entry.infoUrl, { signal }, 5000);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const parsed = entry.kind === 'azuracast'
+      ? parseAzuraCastNowPlaying(data)
+      : parseByKind(entry.kind, data, streamUrl);
+    if (!parsed) return null;
+    return {
+      source: `station-map-${entry.kind}`,
+      ...parsed,
+      raw: { endpoint: entry.infoUrl, station: entry.station },
+      confidence: 0.9,
+      cacheTtl: CACHE_TTL_BY_KIND[entry.kind] || 30,
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 // Airtime Pro integration
@@ -879,6 +964,30 @@ async function fetchRadioCoMetadata(streamUrl, { signal } = {}) {
   }
 }
 
+// Pure parser for the AzuraCast now-playing shape ({now_playing: {song:
+// {artist, title, text}}}). Shared between the derived-endpoint strategy
+// below and station-map entries whose API lives on a different host (KWSX).
+function parseAzuraCastNowPlaying(data) {
+  const song = data?.now_playing?.song || data?.now_playing;
+  if (!song || typeof song !== 'object') return null;
+  const artist = (song.artist || '').trim();
+  const trackTitle = (song.title || '').trim();
+  const text = (song.text || '').trim();
+  let display = '';
+  if (artist && trackTitle && artist !== trackTitle) {
+    display = `${artist} - ${trackTitle}`;
+  } else if (text) {
+    display = text;
+  } else if (trackTitle) {
+    display = trackTitle;
+  } else if (artist) {
+    display = artist;
+  }
+  display = cleanNowPlaying(display);
+  if (!display || !isValidMetadata({ display })) return null;
+  return { display, artist: artist || null, title: trackTitle || null };
+}
+
 // AzuraCast exposes /api/nowplaying_static/<shortcode>.json on the host that
 // also serves the stream. The shortcode is in the stream path:
 //   https://radio.example.com/listen/myradio/radio.mp3 -> "myradio"
@@ -901,28 +1010,11 @@ async function fetchAzuraCastMetadata(streamUrl, { signal } = {}) {
         const data = await response.json();
         // Static endpoint returns a single object; non-static returns the
         // same shape but is the canonical source if the static is stale.
-        const song = data?.now_playing?.song || data?.now_playing;
-        if (!song) continue;
-        const artist = (song.artist || '').trim();
-        const trackTitle = (song.title || '').trim();
-        const text = (song.text || '').trim();
-        let display = '';
-        if (artist && trackTitle && artist !== trackTitle) {
-          display = `${artist} - ${trackTitle}`;
-        } else if (text) {
-          display = text;
-        } else if (trackTitle) {
-          display = trackTitle;
-        } else if (artist) {
-          display = artist;
-        }
-        display = cleanNowPlaying(display);
-        if (!display || !isValidMetadata({ display })) continue;
+        const parsed = parseAzuraCastNowPlaying(data);
+        if (!parsed) continue;
         return {
           source: 'azuracast',
-          display,
-          artist: artist || null,
-          title: trackTitle || null,
+          ...parsed,
           raw: { now_playing: data.now_playing, station: data.station },
           confidence: 0.9,
           cacheTtl: 20,
@@ -1459,6 +1551,25 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
       strategies.push(() => fetchNTSMetadata(streamUrl, stationId, opts));
     }
 
+    if (isNTSMixtapeStreamUrl(streamUrl)) {
+      strategies.push(() => fetchNTSMixtapeMetadata(streamUrl, opts));
+    }
+
+    if (deriveRadioCultEndpointFromStream(streamUrl)) {
+      strategies.push(() => fetchRadioCultMetadata(streamUrl, opts));
+    }
+
+    if (deriveRadioJarEndpointFromStream(streamUrl)) {
+      strategies.push(() => fetchRadioJarMetadata(streamUrl, opts));
+    }
+
+    // Curated map for stations whose metadata API lives on a different host
+    // than the stream — the generic probe below can never find these.
+    const stationMapEntry = findStationMapEntry(streamUrl);
+    if (stationMapEntry) {
+      strategies.push(() => fetchStationMapMetadata(stationMapEntry, streamUrl, opts));
+    }
+
     if (streamUrl.includes('cashmereradio.airtime.pro')) {
       strategies.push(() => fetchCashmereMetadata(opts));
     } else if (isAirtimeProStreamUrl(streamUrl)) {
@@ -1652,4 +1763,11 @@ module.exports = {
   firstNonNullResult,
   findCurrentHKCRShow,
   findCurrentRinseEpisode,
+  deriveRadioCultEndpointFromStream,
+  parseRadioCultNowPlaying,
+  deriveRadioJarEndpointFromStream,
+  parseRadioJarNowPlaying,
+  isNTSMixtapeStreamUrl,
+  findNTSMixtape,
+  parseAzuraCastNowPlaying,
 };

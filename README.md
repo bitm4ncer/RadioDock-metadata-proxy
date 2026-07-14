@@ -94,18 +94,23 @@ Health check endpoint for monitoring and load balancers.
 
 ## Supported Metadata Sources
 
-The proxy implements all metadata strategies from the original extension:
+The proxy implements all metadata strategies from the original extension plus community-station platforms:
 
 1. **ICY Metadata** - Stream metadata blocks with Icy-MetaData headers
 2. **Icecast Status** - JSON status endpoints (status-json.xsl, status.json, etc.)
 3. **NTS Radio API** - Live channel metadata from nts.live
-4. **Airtime Pro** - Generic Airtime Pro stations using live-info-v2 API
-5. **Cashmere Radio** - Specific Airtime Pro instance
-6. **Radio King** - radioking.com API endpoints
-7. **Callshop Radio** - Custom JSON status endpoint  
-8. **Generic APIs** - Common station API patterns
-9. **Radio Browser** - Fallback using radio-browser.info data
-10. **Station Info** - Last resort using station name/info
+4. **NTS Mixtapes** - Themed mixtape channels (Poolside, 4 To The Floor, ...) via the nts.live mixtapes API
+5. **Airtime Pro** - Generic Airtime Pro stations using live-info-v2 API (endpoint derived from the stream URL)
+6. **RadioCult** - Generic radiocult.fm stations (endpoint derived from the stream subdomain; Noods, Oroko, Worldwide FM, n10.as, ...)
+7. **RadioJar** - Generic radiojar.com stations (endpoint derived from the stream id; Radio Alhara, ...)
+8. **Cashmere Radio** - Specific Airtime Pro instance
+9. **Radio King** - radioking.com API endpoints
+10. **Callshop Radio** - Custom JSON status endpoint
+11. **Schedule APIs** - HKCR, ROVR, Rinse FM (HLS streams with schedule-based now-playing)
+12. **Station Map** - Curated per-station APIs that live on a different host than the stream and can't be derived: Creek (KALX, KUSF), KEXP, BFF.fm, CKUT, WNYU, Radio Vilnius, KWSX, and Airtime v1/LibreTime stations (Radio Sygma, Radio Quantica, Skylab, Veneno, Soho Radio). See `strategies/station-map.js`.
+13. **Generic APIs** - Common station API patterns
+14. **Radio Browser** - Fallback using radio-browser.info data
+15. **Station Info** - Last resort using station name/info
 
 **HLS Exclusion:** URLs containing `.m3u8` return `{ok: false, reason: "hls-client"}` to ensure local processing.
 

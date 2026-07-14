@@ -1,0 +1,23 @@
+{
+  "segment": {
+    "start": "2026-07-08T22:00:00.000000Z",
+    "end": "2026-07-09T00:00:00.000000Z"
+  },
+  "show": {
+    "id": 15469,
+    "title": "Moe",
+    "name": "moe-83"
+  },
+  "broadcast": {
+    "title": null
+  },
+  "track": {
+    "start": "2026-07-08T22:57:31.000000Z",
+    "end": "2026-07-08T23:00:28.000000Z",
+    "song": {
+      "artist": "Cardiacs",
+      "title": "The May",
+      "album": "LSD"
+    }
+  }
+}
