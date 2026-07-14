@@ -66,8 +66,10 @@ function rateLimit(req, res, next) {
   next();
 }
 
-// Clean up rate limit map periodically
-setInterval(() => {
+// Clean up rate limit map periodically. unref'd so this timer alone never
+// keeps the process alive — in production the listening socket does that;
+// when the module is merely required (unit tests) the process must still exit.
+const rateLimitSweep = setInterval(() => {
   const now = Date.now();
   for (const [clientId, data] of rateLimitMap.entries()) {
     if (now > data.resetTime) {
@@ -75,6 +77,7 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000); // cleanup every 5 minutes
+if (rateLimitSweep.unref) rateLimitSweep.unref();
 
 // CORS configuration
 const corsOptions = {
@@ -200,8 +203,25 @@ function validateMetadataRequest(query) {
     return { valid: false, error: 'Invalid stationId' };
   }
   
-  if (homepage && (typeof homepage !== 'string' || homepage.length > 500)) {
-    return { valid: false, error: 'Invalid homepage URL' };
+  // `homepage` is client-supplied and the generic coverage engine FETCHES it
+  // (Phase B probes the homepage origin), so it needs the same URL safety as
+  // `url` — scheme allowlist + literal private/loopback rejection. The global
+  // safe dispatcher (safeLookup) is the second layer against DNS rebinding.
+  if (homepage) {
+    if (typeof homepage !== 'string' || homepage.length > 500) {
+      return { valid: false, error: 'Invalid homepage URL' };
+    }
+    try {
+      const parsedHome = new URL(homepage);
+      if (!['http:', 'https:'].includes(parsedHome.protocol)) {
+        return { valid: false, error: 'Invalid homepage scheme (only http/https allowed)', reason: 'invalid-homepage' };
+      }
+      if (isHostnameLiteralPrivate(parsedHome.hostname)) {
+        return { valid: false, error: 'Refusing to fetch private or loopback homepage', reason: 'invalid-homepage' };
+      }
+    } catch (e) {
+      return { valid: false, error: 'Invalid homepage URL format', reason: 'invalid-homepage' };
+    }
   }
   
   if (country && (typeof country !== 'string' || country.length > 10)) {
@@ -650,15 +670,22 @@ app.use((req, res) => {
   });
 });
 
-app.listen(port, '0.0.0.0', () => {
-  logger.info({
-    port,
-    env: process.env.NODE_ENV || 'development',
-    endpoints: ['/', '/health', '/v1/metadata', '/v1/playlist']
-  }, 'RadioDock metadata proxy server started');
-  // Begin fetching the curated override map (best-effort, refreshes on an
-  // interval; degrades to empty on failure so resolution never breaks).
-  if (process.env.DISABLE_OVERRIDE_MAP !== '1') overrideMap.start();
-});
+// Only listen when run directly (`node server.js` — the Docker CMD). Requiring
+// this module, e.g. to unit-test the request validators, must not bind a port
+// or start the override-map refresh timer.
+if (require.main === module) {
+  app.listen(port, '0.0.0.0', () => {
+    logger.info({
+      port,
+      env: process.env.NODE_ENV || 'development',
+      endpoints: ['/', '/health', '/v1/metadata', '/v1/playlist']
+    }, 'RadioDock metadata proxy server started');
+    // Begin fetching the curated override map (best-effort, refreshes on an
+    // interval; degrades to empty on failure so resolution never breaks).
+    if (process.env.DISABLE_OVERRIDE_MAP !== '1') overrideMap.start();
+  });
+}
 
 module.exports = app;
+module.exports.validateMetadataRequest = validateMetadataRequest;
+module.exports.validatePlaylistRequest = validatePlaylistRequest;
