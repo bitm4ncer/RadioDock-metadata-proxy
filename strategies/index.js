@@ -622,7 +622,12 @@ function parseAirtimeProNowPlaying(data) {
     else if (np && (np.title || np.name)) nowPlaying = (np.title || np.name).trim();
   }
 
-  return cleanNowPlaying(nowPlaying);
+  // Apply the same placeholder/junk gate every other strategy uses. Airtime
+  // (LibreTime) emits "offline" as a track/show name when a live source is on
+  // but no scheduled playout runs — that is not now-playing. Dropping it here
+  // lets resolution fall through to ICY stream metadata (Kiosk Radio).
+  const cleaned = cleanNowPlaying(nowPlaying);
+  return isValidMetadata({ display: cleaned }) ? cleaned : '';
 }
 
 async function fetchAirtimeProMetadata(streamUrl, providedEndpoint, { signal } = {}) {
@@ -1770,4 +1775,5 @@ module.exports = {
   isNTSMixtapeStreamUrl,
   findNTSMixtape,
   parseAzuraCastNowPlaying,
+  parseAirtimeProNowPlaying,
 };
