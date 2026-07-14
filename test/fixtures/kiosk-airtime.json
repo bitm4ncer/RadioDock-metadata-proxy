@@ -1,0 +1,13 @@
+{
+  "station": { "source_enabled": "Live DJ", "timezone": "Europe/Brussels", "AIRTIME_API_VERSION": "1.1" },
+  "tracks": {
+    "previous": { "type": "track", "name": " - King Hippo @ Kiosk Radio 05.04.2025", "metadata": { "track_title": "King Hippo @ Kiosk Radio 05.04.2025", "artist_name": "" } },
+    "current": { "starts": "2026-07-14 18:00:00", "ends": "2026-07-14 19:00:00", "type": "livestream", "name": "", "media_item_played": false, "record": "0" },
+    "next": { "type": "track", "name": " - Strange Weather w/ JEANUT", "metadata": { "track_title": "Strange Weather w/ JEANUT", "artist_name": "" } }
+  },
+  "shows": {
+    "previous": [],
+    "current": { "name": "Teenage Menopause w/ Party4ngelxoxo", "description": "", "genre": "", "id": 17104, "starts": "2026-07-14 18:00:00", "ends": "2026-07-14 19:00:00" },
+    "next": [ { "name": "C&#039;est La Cata w/ Catalina", "starts": "2026-07-14 19:00:00", "ends": "2026-07-14 20:00:00" } ]
+  }
+}

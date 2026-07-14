@@ -31,7 +31,7 @@ const { request } = require('undici');
 const { readBoundedBody } = require('../lib/safe-fetch.js');
 const probeCache = require('../lib/probe-cache.js');
 const { cleanNowPlaying, isPlaceholder, isValidMetadata } = require('../lib/normalize.js');
-const { findStationMapEntry, parseByKind, CACHE_TTL_BY_KIND } = require('./station-map.js');
+const { findStationMapEntry, parseByKind, CACHE_TTL_BY_KIND, HTML_KINDS } = require('./station-map.js');
 
 // Timeout configuration - reduced for better responsiveness
 const DEFAULT_TIMEOUT = 6000;
@@ -532,7 +532,7 @@ async function fetchStationMapMetadata(entry, streamUrl, { signal } = {}) {
   try {
     const response = await fetchWithTimeout(entry.infoUrl, { signal }, 5000);
     if (!response.ok) return null;
-    const data = await response.json();
+    const data = HTML_KINDS.has(entry.kind) ? await response.text() : await response.json();
     const parsed = entry.kind === 'azuracast'
       ? parseAzuraCastNowPlaying(data)
       : parseByKind(entry.kind, data, streamUrl);

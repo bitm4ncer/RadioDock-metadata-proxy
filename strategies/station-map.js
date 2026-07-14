@@ -104,6 +104,7 @@ const CACHE_TTL_BY_KIND = {
   azuracast: 15,
   'airtime-v1': 30,
   wnyu: 60,
+  wwoz: 60,
 };
 
 function findStationMapEntry(streamUrl) {
@@ -247,6 +248,21 @@ function parseWNYUCurrent(data) {
   return toResult(title);
 }
 
+// WWOZ (wwoz.org) exposes no JSON now-playing API; the on-air programme is
+// server-rendered into the page header:
+//   <p class="… on-air"> … <span class="song-artist"><a …>PROGRAMME</a></span>
+// `data` is the raw HTML string (wwoz is an HTML_KINDS member — fetched as text).
+function parseWWOZOnAir(html) {
+  const s = typeof html === 'string' ? html : '';
+  const m = s.match(/class="[^"]*on-air[^"]*"[\s\S]{0,800}?class="song-artist"[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
+  if (!m) return null;
+  const text = m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return toResult(text);
+}
+
+// Kinds whose infoUrl returns HTML rather than JSON — fetched via response.text().
+const HTML_KINDS = new Set(['wwoz']);
+
 function parseByKind(kind, data, streamUrl) {
   switch (kind) {
     case 'creek': return parseCreekCurrent(data);
@@ -256,6 +272,7 @@ function parseByKind(kind, data, streamUrl) {
     case 'icecast-allstats': return parseIcecastAllStats(data, streamUrl);
     case 'airtime-v1': return parseAirtimeV1(data);
     case 'wnyu': return parseWNYUCurrent(data);
+    case 'wwoz': return parseWWOZOnAir(data);
     // 'azuracast' is dispatched in strategies/index.js — its parser is shared
     // with the derived-endpoint AzuraCast strategy there.
     default: return null;
@@ -265,8 +282,10 @@ function parseByKind(kind, data, streamUrl) {
 module.exports = {
   STATION_MAP,
   CACHE_TTL_BY_KIND,
+  HTML_KINDS,
   findStationMapEntry,
   parseByKind,
+  parseWWOZOnAir,
   parseAirtimeV1,
   parseCreekCurrent,
   parseKEXPPlay,
