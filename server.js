@@ -3,7 +3,7 @@ const cors = require('cors');
 const pino = require('pino');
 const { LRUCache } = require('lru-cache');
 const { request } = require('undici');
-const { fetchMetadata } = require('./strategies/index.js');
+const { fetchMetadata, overrideMap } = require('./strategies/index.js');
 const { installSafeDispatcher, isHostnameLiteralPrivate } = require('./lib/safe-fetch.js');
 const { createSingleFlight } = require('./lib/single-flight.js');
 
@@ -651,11 +651,14 @@ app.use((req, res) => {
 });
 
 app.listen(port, '0.0.0.0', () => {
-  logger.info({ 
-    port, 
+  logger.info({
+    port,
     env: process.env.NODE_ENV || 'development',
     endpoints: ['/', '/health', '/v1/metadata', '/v1/playlist']
   }, 'RadioDock metadata proxy server started');
+  // Begin fetching the curated override map (best-effort, refreshes on an
+  // interval; degrades to empty on failure so resolution never breaks).
+  if (process.env.DISABLE_OVERRIDE_MAP !== '1') overrideMap.start();
 });
 
 module.exports = app;
