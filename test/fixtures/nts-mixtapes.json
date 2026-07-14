@@ -1,0 +1,35 @@
+{
+  "metadata": {
+    "subtitle": "Music-only themed radio streams, made from NTS resident and guest shows",
+    "credits": "Residents and guests whose radio shows feature in these mixtapes:",
+    "mq_host": "",
+    "animation_large_portrait": "https://media2.ntslive.co.uk/static/nts_cube_video-1080x1920-40fps-57dcafe2db72de8d038d3159494edbda.mp4"
+  },
+  "results": [
+    {
+      "mixtape_alias": "slow-focus",
+      "title": "Slow Focus",
+      "subtitle": "Meditative, relaxing and beatless: ambient, drone and ragas.",
+      "audio_stream_endpoint": "https://stream-mixtape-geo.ntslive.net/mixtape"
+    },
+    {
+      "mixtape_alias": "4-to-the-floor",
+      "title": "4 To The Floor",
+      "subtitle": "House and techno from past to present.",
+      "audio_stream_endpoint": "https://stream-mixtape-geo.ntslive.net/mixtape5"
+    },
+    {
+      "mixtape_alias": "otaku",
+      "title": "Otaku",
+      "subtitle": "Video game and anime soundtracks, for fanboys and fangirls.",
+      "audio_stream_endpoint": "https://stream-mixtape-geo.ntslive.net/mixtape36"
+    }
+  ],
+  "links": [
+    {
+      "rel": "self",
+      "href": "https://www.nts.live/api/v2/mixtapes",
+      "type": "application/vnd.mixtape-list+json;charset=utf-8"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "station": {
+    "env": "production",
+    "schedulerTime": "2026-07-09 02:04:21",
+    "source_enabled": "Scheduled",
+    "timezone": "Europe/Moscow",
+    "AIRTIME_API_VERSION": "1.1"
+  },
+  "tracks": {
+    "current": {
+      "starts": "2026-07-09 01:46:11",
+      "ends": "2026-07-09 02:56:53",
+      "type": "track",
+      "name": "serpin - prosthetic sentiments 02 – cerpintxt x Stephan Barrett"
+    }
+  },
+  "shows": {
+    "current": {
+      "name": "Rotation",
+      "starts": "2026-07-08 06:00:00",
+      "ends": "2026-07-09 05:59:00"
+    }
+  }
+}

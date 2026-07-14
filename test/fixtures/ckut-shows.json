@@ -1,0 +1,35 @@
+{
+  "program": {
+    "id": "HS",
+    "title_html": "Harbinger Showcase",
+    "description_html": "Weekly highlights from Canada’s #1 coast-to-coast community of politically and socially progressive podcasts including Alberta Advantage, The Breach Show, Tech Won’t Save Us, Press Progress Sources & 55 more.<br />\r\n<br />\r\nThis podcast is syndicated for community and campus radio at CIUT 89.5FM in Toronto, CKUT 90.3FM in Montreal, CKUW 95.9FM in Winnipeg and at Vancouver Co-op Radio. As of January 2024, it has moved from the 3rd Wednesday of every month from 5-6pm to every Wednesday from 7-8 pm.<br />\r\n<br />\r\nSee all the Harbinger podcasts at <a href=\"https://harbingermedianetwork.com/\">harbingermedianetwork.com</a>",
+    "url": "https://ckut.ca/playlists/HS",
+    "start_time_mmss": "7pm",
+    "end_time_mmss": "8pm"
+  },
+  "episode": {
+    "url": "https://ckut.ca/playlists/shows/30354",
+    "id": "30354",
+    "description_html": null,
+    "live_indicator_flag": true
+  },
+  "segment": {
+    "artist_html": null,
+    "title_html": null,
+    "album_html": null,
+    "record_label_html": null,
+    "media_html": null,
+    "comment_html": null,
+    "year_html": null,
+    "set_break_flag": false,
+    "set_break_text": null,
+    "set_end_flag": false,
+    "special_flag": false,
+    "new_flag": false,
+    "set_title_html": null,
+    "long_comment_html": null,
+    "song_fav_id": null,
+    "image": null,
+    "song_text_formatted_html": null
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "station": {
+    "name": "KWSX"
+  },
+  "is_online": true,
+  "now_playing": {
+    "song": {
+      "id": "3889cd2006dfbe9e1b078a602d86348e",
+      "art": "https://stream.kwsx.online/api/station/kwsx/art/bef22fce03a0aafc49b7b56c-1753669000.jpg",
+      "custom_fields": [],
+      "text": "CMD094 - Scan",
+      "artist": "CMD094",
+      "title": "Scan",
+      "album": "Liquid",
+      "genre": "Electro",
+      "isrc": "USA2P1917412",
+      "lyrics": ""
+    },
+    "played_at": 1783551790
+  }
+}

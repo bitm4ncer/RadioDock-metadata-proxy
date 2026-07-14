@@ -1,0 +1,13 @@
+{
+  "next": "https://api.kexp.org/v2/plays/?format=json&limit=1&offset=1",
+  "previous": null,
+  "results": [
+    {
+      "airdate": "2026-07-08T16:00:58-07:00",
+      "song": "Isobel",
+      "artist": "Björk",
+      "album": "Post",
+      "play_type": "trackplay"
+    }
+  ]
+}

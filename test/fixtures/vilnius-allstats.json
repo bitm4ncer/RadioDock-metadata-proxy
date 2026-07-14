@@ -1,0 +1,52 @@
+{
+  "allStats": [
+    {
+      "artist": "David Lynch",
+      "title": "David Lynch 01",
+      "listenurl": "http://radio.audiomastering.lt:8000/guest",
+      "yp_currently_playing": "David Lynch - David Lynch 01",
+      "server_name": "radio.audiomastering.lt"
+    },
+    {
+      "artist": "David Lynch",
+      "title": "David Lynch 01",
+      "listenurl": "http://radio.audiomastering.lt:8000/hq",
+      "yp_currently_playing": "David Lynch - David Lynch 01",
+      "server_name": "radio.audiomastering.lt"
+    },
+    {
+      "listenurl": "http://radio.audiomastering.lt:8000/live"
+    },
+    {
+      "artist": "David Lynch",
+      "title": "David Lynch 01",
+      "listenurl": "http://radio.audiomastering.lt:8000/ogg",
+      "yp_currently_playing": "David Lynch - David Lynch 01",
+      "server_name": "radio.audiomastering.lt"
+    },
+    {
+      "listenurl": "http://radio.audiomastering.lt:8000/pure",
+      "server_name": "radio.audiomastering.lt"
+    },
+    {
+      "artist": "Laikas eina per miestą: Carla dal Forno",
+      "title": "Clusters",
+      "listenurl": "http://radio.audiomastering.lt:8000/radiovilnius-mp3",
+      "yp_currently_playing": "Laikas eina per miestą: Carla dal Forno - Clusters",
+      "server_name": "Radio Vilnius"
+    },
+    {
+      "title": "No More White Horses",
+      "listenurl": "http://radio.audiomastering.lt:8000/raion",
+      "yp_currently_playing": "No More White Horses",
+      "server_name": "raionoradio.lt"
+    },
+    {
+      "artist": "Gintas Rožė",
+      "title": "Jet-Set",
+      "listenurl": "http://radio.audiomastering.lt:8000/svieziosultys",
+      "yp_currently_playing": "Gintas Rožė - Jet-Set",
+      "server_name": "šviežios sultys"
+    }
+  ]
+}
