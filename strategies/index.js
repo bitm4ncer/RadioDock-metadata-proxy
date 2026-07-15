@@ -620,6 +620,91 @@ async function fetchStationMapMetadata(entry, streamUrl, { signal } = {}) {
   }
 }
 
+// StreamTheWorld / Triton Digital — by far the largest platform in the dataset
+// (2,634 of 52k stations). Now-playing lives on np.tritondigital.com keyed by
+// the mount name, which is the last segment of the stream path — so it derives
+// from the URL and needs no per-station rule.
+//
+// Two shapes cover ~99%:
+//   playerservices.streamtheworld.com/api/livestream-redirect/<MOUNT>[.aac]  (1,643)
+//   <N>.live.streamtheworld.com/<MOUNT>[.aac]                                 (976)
+function deriveStreamTheWorldMount(streamUrl) {
+  try {
+    if (!streamUrl) return null;
+    const u = new URL(streamUrl);
+    if (!/(^|\.)streamtheworld\.com$/i.test(u.hostname)) return null;
+    const last = u.pathname.split('/').filter(Boolean).pop() || '';
+    const mount = last.replace(/\.(aac|mp3|m3u8)$/i, '');
+    return mount || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function tritonCdata(xml, key) {
+  const needle = 'name="' + key + '"><![CDATA[';
+  const i = xml.indexOf(needle);
+  if (i === -1) return '';
+  const start = i + needle.length;
+  const end = xml.indexOf(']]>', start);
+  return end === -1 ? '' : xml.slice(start, end).trim();
+}
+
+// Triton answers XML with CDATA-wrapped properties. Talk/news mounts return an
+// empty <nowplaying-info-list/> — a legitimate "nothing playing", not an error.
+function parseTritonNowPlaying(xml) {
+  const s = typeof xml === 'string' ? xml : '';
+  if (!s) return null;
+  const title = cleanNowPlaying(tritonCdata(s, 'cue_title'));
+  const artist = cleanNowPlaying(tritonCdata(s, 'track_artist_name'));
+  if (!title && !artist) return null;
+  const display = parseArtistTitle('', artist, title);
+  if (!display || !isValidMetadata({ display })) return null;
+  return { artist: artist || null, title: title || null, display };
+}
+
+const TRITON_NP_BASE = 'https://np.tritondigital.com/public/nowplaying';
+
+async function fetchTritonForMount(mount, { signal }) {
+  const url = TRITON_NP_BASE + '?mountName=' + encodeURIComponent(mount) + '&numberToFetch=1&eventType=track';
+  const response = await fetchWithTimeout(url, { signal }, 4000);
+  if (!response.ok) return null;
+  return parseTritonNowPlaying(await response.text());
+}
+
+async function fetchStreamTheWorldMetadata(streamUrl, { signal } = {}) {
+  try {
+    const mount = deriveStreamTheWorldMount(streamUrl);
+    if (!mount) return null;
+
+    // The mount is case-sensitive at Triton and stream URLs do not always carry
+    // the canonical case: ACIR11_s01AAC returns nothing where ACIR11_S01AAC
+    // returns the track. Try as-is, then upper-case — that lifted the measured
+    // sample hit rate from 7/13 to 11/13.
+    const candidates = [mount];
+    if (mount.toUpperCase() !== mount) candidates.push(mount.toUpperCase());
+
+    for (const cand of candidates) {
+      if (signal?.aborted) return null;
+      const parsed = await fetchTritonForMount(cand, { signal });
+      if (parsed) {
+        return {
+          source: 'streamtheworld',
+          display: parsed.display,
+          artist: parsed.artist,
+          title: parsed.title,
+          raw: { mount: cand },
+          confidence: 0.85,
+          cacheTtl: 15,
+        };
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Airtime Pro integration
 function deriveAirtimeProEndpointFromStream(streamUrl) {
   try {
@@ -1732,6 +1817,12 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country, name }) 
       strategies.push(() => fetchNTSMixtapeMetadata(streamUrl, opts));
     }
 
+    // StreamTheWorld/Triton — the largest platform in the dataset; the mount
+    // derives straight from the stream URL.
+    if (deriveStreamTheWorldMount(streamUrl)) {
+      strategies.push(() => fetchStreamTheWorldMetadata(streamUrl, opts));
+    }
+
     if (deriveRadioCultEndpointFromStream(streamUrl)) {
       strategies.push(() => fetchRadioCultMetadata(streamUrl, opts));
     }
@@ -1973,6 +2064,8 @@ module.exports = {
   findCurrentRinseEpisode,
   deriveRadioCultEndpointFromStream,
   parseRadioCultNowPlaying,
+  deriveStreamTheWorldMount,
+  parseTritonNowPlaying,
   deriveRadioJarEndpointFromStream,
   parseRadioJarNowPlaying,
   isNTSMixtapeStreamUrl,
