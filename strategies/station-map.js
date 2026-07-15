@@ -71,7 +71,12 @@ const STATION_MAP = [
   {
     kind: 'airtime-v1',
     station: 'Veneno',
-    hosts: ['radio.veneno.live'],
+    // The stream is on veneno.out.airtime.pro while the API is on
+    // radio.veneno.live — unrelated hosts, and veneno.live (the homepage) 404s
+    // on /api/live-info, so neither derivation nor the homepage tier can find
+    // it. Listing only radio.veneno.live meant this entry never matched the
+    // stream it exists for.
+    hosts: ['veneno.out.airtime.pro', 'radio.veneno.live'],
     infoUrl: 'https://radio.veneno.live/api/live-info',
   },
 ];

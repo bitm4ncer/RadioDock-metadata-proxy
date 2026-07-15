@@ -134,6 +134,8 @@ test('findStationMapEntry: resolves known stream hosts (port ignored)', () => {
     ['https://radio.syg.ma/audio.mp3', 'airtime-v1'],
     ['https://libretime.radioquantica.com/main.mp3', 'airtime-v1'],
     ['https://radio.veneno.live/stream/main', 'airtime-v1'],
+    // The host the stream actually uses — the entry matched nothing before.
+    ['https://veneno.out.airtime.pro/veneno_b', 'airtime-v1'],
   ];
   for (const [url, kind] of cases) {
     const entry = findStationMapEntry(url);

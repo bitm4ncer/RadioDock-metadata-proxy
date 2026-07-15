@@ -723,6 +723,11 @@ function deriveAirtimeProEndpointFromStream(streamUrl) {
       const seg = u.pathname.split('/').filter(Boolean)[0];
       if (seg) return `https://${seg}.streamnerd.nl/api/live-info-v2`;
     }
+    // Some stations stream straight off their own streamnerd subdomain, with no
+    // path segment to read (Relate Radio: https://relateradio.streamnerd.nl/).
+    // The Airtime API then sits on that same host, so derive from the subdomain.
+    const sn = host.match(/^([^.]+)\.streamnerd\.nl$/i);
+    if (sn) return `https://${sn[1]}.streamnerd.nl/api/live-info-v2`;
     return null;
   } catch (e) {
     return null;
