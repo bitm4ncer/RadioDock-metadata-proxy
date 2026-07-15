@@ -61,6 +61,37 @@ test('invalid homepage yields null, never a throw', async () => {
   assert.equal(await fetchHomepageApi('', { fetchImpl: async () => notFound, stationName: 'X' }), null);
 });
 
+test('cold cache: probes run in one round, not one after another', async () => {
+  // Regression, found in production: sequential probing burned the whole
+  // Phase-B budget before Stage 3 could run, so WWOZ's FIRST request returned
+  // nothing after 10s while a warm cache resolved it in 2.4s. The first request
+  // for a station is the one that matters — it must not be the slow one.
+  probeCache._resetForTests();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchImpl = async () => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setTimeout(r, 20));
+    inFlight--;
+    return notFound;
+  };
+  await fetchHomepageApi('https://cold.example/', { fetchImpl, stationName: 'X' });
+  assert.ok(maxInFlight > 1, `probes must overlap; max in flight was ${maxInFlight}`);
+});
+
+test('the earliest matching path still wins, despite probing concurrently', async () => {
+  probeCache._resetForTests();
+  const fetchImpl = async (url) => {
+    // Both are valid endpoints; /api/now-playing comes first in HOMEPAGE_PATHS.
+    if (url.endsWith('/api/now-playing')) return json({ title: 'First Choice', artist: 'A' });
+    if (url.endsWith('/currentsong')) return json({ title: 'Later Choice', artist: 'B' });
+    return notFound;
+  };
+  const r = await fetchHomepageApi('https://x.example/', { fetchImpl, stationName: 'X' });
+  assert.equal(r.display, 'A - First Choice');
+});
+
 test('HOMEPAGE_PATHS covers the paths the special rules needed', () => {
   for (const p of ['/api/now-playing', '/api/nowplaying', '/api/live-info-v2', '/status-json.xsl', '/api/current']) {
     assert.ok(HOMEPAGE_PATHS.includes(p), `${p} missing`);
