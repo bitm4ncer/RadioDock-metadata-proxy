@@ -33,6 +33,12 @@ const probeCache = require('../lib/probe-cache.js');
 const { cleanNowPlaying, isPlaceholder, isValidMetadata } = require('../lib/normalize.js');
 const { findStationMapEntry, parseByKind, CACHE_TTL_BY_KIND, HTML_KINDS } = require('./station-map.js');
 const { makeOverrideMap } = require('../lib/override-map.js');
+const { resolveHomepage } = require('../lib/homepage-probe.js');
+
+// Phase B (homepage tier) entry point, swappable so the two-phase wiring is
+// unit-testable without reaching the network.
+let homepageTier = resolveHomepage;
+function _setHomepageTierForTests(fn) { homepageTier = fn || resolveHomepage; }
 
 // Curated per-station override map, fetched from the PWA-published JSON. Both
 // proxy instances consume it; degrades to empty on any failure. start() is
@@ -1626,7 +1632,7 @@ async function resolveOverride(entry, streamUrl, { signal } = {}) {
   return { source: 'override-json-generic', ...parsed, raw: { endpoint: entry.endpoint }, confidence: 0.98, cacheTtl: entry.ttl || 15 };
 }
 
-async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
+async function fetchMetadata({ streamUrl, stationId, homepage, country, name }) {
   // Station-specific handlers for stations whose audio is HLS but whose
   // now-playing data is exposed via a separate API. Must run BEFORE the
   // generic .m3u8 bail below — otherwise these never reach their strategy.
@@ -1701,7 +1707,7 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
     };
   }
 
-  const station = { stationId, url: streamUrl, homepage, country };
+  const station = { stationId, url: streamUrl, homepage, country, name };
   const strategies = [];
 
   // Parent controller — selectBestResult aborts() this once it picks a
@@ -1805,7 +1811,7 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
     );
 
     const result = await selectBestResult(promises, parentCtrl, { harvestMs: 600 });
-    
+
     if (result && result.display) {
       return {
         source: result.source,
@@ -1816,7 +1822,38 @@ async function fetchMetadata({ streamUrl, stationId, homepage, country }) {
         cacheTtl: result.cacheTtl || 15
       };
     }
-    
+
+    // ---- Phase B: the homepage tier ------------------------------------
+    // Only on a Phase-A miss, so the vast majority of stations (ICY/Icecast/
+    // platform APIs) pay no extra request or latency. Flag-gated and OFF by
+    // default: it runs on Hetzner (primary) while Render keeps the proven path,
+    // so an engine bug can't take out primary and fallback at the same time.
+    if (process.env.ENABLE_HOMEPAGE_TIER === '1' && homepage) {
+      // Fresh controller: parentCtrl may already be aborted by selectBestResult.
+      const hpCtrl = new AbortController();
+      try {
+        const hp = await Promise.race([
+          homepageTier(homepage, { signal: hpCtrl.signal, stationName: station.name || '' }),
+          new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+        ]);
+        if (hp && hp.display) {
+          return {
+            source: hp.source,
+            display: hp.display,
+            artist: hp.artist ?? null,
+            title: hp.title ?? null,
+            raw: hp.raw,
+            cacheTtl: hp.cacheTtl || 15,
+          };
+        }
+      } catch (e) {
+        // The tier is best-effort — a failure here must degrade to no-metadata,
+        // never leak an error to the client.
+      } finally {
+        try { hpCtrl.abort(); } catch (_) { /* noop */ }
+      }
+    }
+
     return {
       ok: false,
       reason: 'no-metadata'
@@ -1945,4 +1982,5 @@ module.exports = {
   resolvePath,
   resolveJsonGeneric,
   overrideMap,
+  _setHomepageTierForTests,
 };

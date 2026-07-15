@@ -176,7 +176,7 @@ app.use((req, res, next) => {
 
 // Input validation helper
 function validateMetadataRequest(query) {
-  const { url, stationId, homepage, country } = query;
+  const { url, stationId, homepage, country, name } = query;
   
   if (!url || typeof url !== 'string') {
     return { valid: false, error: 'Missing or invalid stream URL' };
@@ -226,6 +226,12 @@ function validateMetadataRequest(query) {
   
   if (country && (typeof country !== 'string' || country.length > 10)) {
     return { valid: false, error: 'Invalid country code' };
+  }
+
+  // Optional. Used only as a reference for the station-echo gate, so the
+  // generic engine can never present a station's own name as now-playing.
+  if (name && (typeof name !== 'string' || name.length > 200)) {
+    return { valid: false, error: 'Invalid station name' };
   }
   
   return { valid: true };
@@ -440,7 +446,7 @@ app.get('/health', (req, res) => {
 // Main metadata endpoint
 app.get('/v1/metadata', async (req, res) => {
   const fetchedAt = Date.now();
-  const { url: streamUrl, stationId, homepage, country } = req.query;
+  const { url: streamUrl, stationId, homepage, country, name } = req.query;
   
   // Input validation
   const validation = validateMetadataRequest(req.query);
@@ -480,7 +486,7 @@ app.get('/v1/metadata', async (req, res) => {
         setTimeout(() => reject(Object.assign(new Error('TIMEOUT'), { code: 'TIMEOUT' })), 12000);
       });
       return Promise.race([
-        fetchMetadata({ streamUrl, stationId, homepage, country }),
+        fetchMetadata({ streamUrl, stationId, homepage, country, name }),
         fetchTimeout,
       ]);
     });
