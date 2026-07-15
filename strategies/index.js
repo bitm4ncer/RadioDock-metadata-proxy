@@ -155,35 +155,91 @@ function parseArtistTitle(text, artist = '', title = '') {
 }
 
 // Common JSON parsing for various station API formats
+// Generic now-playing extraction — the mechanism that lets an unknown API work
+// without a per-station rule. Walks a priority list of common containers and
+// reads artist/title through key aliases. Only strings are ever accepted: the
+// previous version did `title = data.song || data.track`, which assigned the
+// OBJECT whenever a payload nested its fields and leaked "[object Object]".
+const ARTIST_KEYS = ['artist', 'artist_name', 'artistName', 'performer', 'trackArtist'];
+const TITLE_KEYS = ['title', 'track_title', 'trackTitle', 'song', 'track', 'songtitle'];
+const SHOW_NAME_KEYS = ['name', 'title', 'title_html', 'show', 'program', 'programme'];
+
+// Most specific first; each resolves to an object holding artist/title keys.
+const CONTAINER_PATHS = [
+  ['now_playing', 'song'],            // AzuraCast
+  ['nowplaying', 'song'],
+  ['tracks', 'current', 'metadata'],  // Airtime / LibreTime v1
+  ['track', 'song'],                  // Creek
+  ['icestats', 'source'],             // Icecast status-json
+  ['results', 0],                     // KEXP-style result lists
+  ['now_playing'],
+  ['nowplaying'],
+  ['current'],
+  ['now'],
+  ['live'],
+  ['data'],
+  ['track'],
+  [],                                 // the payload root itself
+];
+
+const SHOW_PATHS = [['shows', 'current'], ['program'], ['show'], []];
+
+function asString(v) {
+  return typeof v === 'string' && v.trim() ? v.trim() : '';
+}
+
+function pickKey(obj, keys) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const k of keys) {
+    const v = asString(obj[k]);
+    if (v) return v;
+  }
+  return '';
+}
+
+function resolveContainer(obj, path) {
+  let cur = obj;
+  for (const seg of path) {
+    if (cur == null) return null;
+    if (Array.isArray(cur)) cur = typeof seg === 'number' ? cur[seg] : cur[0]?.[seg];
+    else cur = cur[seg];
+  }
+  if (Array.isArray(cur)) cur = cur[0];
+  return cur && typeof cur === 'object' ? cur : null;
+}
+
 function parseStationMetadata(data) {
   if (!data || typeof data !== 'object') return null;
-  
-  let artist = '';
-  let title = '';
-  let nowPlaying = '';
-  
-  // Try different common API formats
-  if (data.nowplaying || data.now_playing) {
-    const np = data.nowplaying || data.now_playing;
-    if (typeof np === 'string') {
-      nowPlaying = np;
-    } else if (np && typeof np === 'object') {
-      artist = np.artist || np.performer || '';
-      title = np.song || np.track || np.title || '';
-    }
-  } else if (data.current) {
-    const current = data.current;
-    if (typeof current === 'string') {
-      nowPlaying = current;
-    } else if (current && typeof current === 'object') {
-      title = current.title || current.track || '';
-    }
-  } else if (data.song || data.track || data.title) {
-    artist = data.artist || '';
-    title = data.song || data.track || data.title || '';
+
+  // 1. A container that is itself the display string ("Artist - Title").
+  for (const key of ['nowplaying', 'now_playing', 'current', 'now']) {
+    const text = asString(data[key]);
+    if (!text) continue;
+    const r = parseArtistTitle(text, '', '');
+    if (r && isValidMetadata({ display: r })) return r;
   }
-  
-  return parseArtistTitle(nowPlaying, artist, title);
+
+  // 2. Structured artist/title containers.
+  for (const path of CONTAINER_PATHS) {
+    const c = resolveContainer(data, path);
+    if (!c) continue;
+    const artist = pickKey(c, ARTIST_KEYS);
+    const title = pickKey(c, TITLE_KEYS);
+    if (!artist && !title) continue;
+    const r = parseArtistTitle('', artist, title);
+    if (r && isValidMetadata({ display: r })) return r;
+  }
+
+  // 3. No track anywhere — fall back to the programme/show name.
+  for (const path of SHOW_PATHS) {
+    const c = resolveContainer(data, path);
+    const showName = pickKey(c, SHOW_NAME_KEYS);
+    if (!showName) continue;
+    const r = cleanNowPlaying(showName);
+    if (r && isValidMetadata({ display: r })) return r;
+  }
+
+  return null;
 }
 
 // Simple first-non-null race. Used inside individual strategies that probe
