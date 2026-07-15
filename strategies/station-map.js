@@ -1,11 +1,28 @@
-// Curated map of stations whose now-playing API lives on a different host
-// than their audio stream, so it can never be derived from the stream URL
-// (the generic probe in strategies/index.js only ever probes the stream's
-// own host). Endpoint list sourced from one-radio.com's aggregator and
-// verified by hand — each `kind` has a parser below written against a real
-// captured response (see test/fixtures/).
+// LAST RESORT — the smallest tier, deliberately.
 //
-// Adding a station = one entry here + (if the API shape is new) one parser.
+// Before adding an entry, be sure the generic mechanisms genuinely fail: the
+// stream-host strategies (ICY, Icecast, platform APIs) run first, and
+// lib/homepage-probe.js then probes the station's own website. A rule is only
+// justified when both come back empty AND its data is measurably better.
+//
+// Every entry below was verified against the live proxy on 2026-07-15, with the
+// rule and without it. Each earns its place:
+//
+//   KALX           creek             without it: only "waiting ..." holding text
+//   KEXP           kexp              without it: nothing — API lives on api.kexp.org
+//   CKUT           ckut              without it: nothing — unusual .php?json=1 path
+//   Radio Vilnius  icecast-allstats  mount-matching across several stations on one
+//                                    server: logic, not a path
+//   Sygma,         airtime-v1        NOT verified (streams unresolvable at audit
+//   Quantica,                        time) — kept rather than deleted blind
+//   Veneno
+//
+// Six entries were deleted in that audit (KUSF, BFF.fm, KWSX, Skylab, Soho,
+// WNYU): plain ICY already resolved all of them and their rules never even won
+// the confidence race. They were pure maintenance cost.
+//
+// Adding a station = one entry here + (if the API shape is new) one parser,
+// written against a real captured response (see test/fixtures/).
 
 const { cleanNowPlaying, isValidMetadata } = require('../lib/normalize.js');
 
@@ -17,22 +34,10 @@ const STATION_MAP = [
     infoUrl: 'https://kalx.studio.creek.org/api/current?x=1&studioId=29',
   },
   {
-    kind: 'creek',
-    station: 'KUSF',
-    hosts: ['listen.kusf.org'],
-    infoUrl: 'https://kusf.studio.creek.org/api/current?x=1&studioId=21',
-  },
-  {
     kind: 'kexp',
     station: 'KEXP',
     hostPattern: /^kexp[a-z0-9-]*\.streamguys1\.com$/i,
     infoUrl: 'https://api.kexp.org/v2/plays/?format=json&limit=1',
-  },
-  {
-    kind: 'bff',
-    station: 'BFF.fm',
-    hosts: ['stream.bff.fm'],
-    infoUrl: 'https://bff.fm/api/data/onair/now.json',
   },
   {
     kind: 'ckut',
@@ -50,12 +55,6 @@ const STATION_MAP = [
     infoUrl: 'https://radiovilnius.live/?rest_route=/radio-vilnius-api/v1/stream-status',
   },
   {
-    kind: 'azuracast',
-    station: 'KWSX',
-    hosts: ['radio.kwsx.online', 'stream.kwsx.online'],
-    infoUrl: 'https://stream.kwsx.online/api/nowplaying/kwsx',
-  },
-  {
     // LibreTime's stats-icecast.json is the Airtime v1 schedule dump, not an
     // Icecast status document, hence the airtime-v1 parser.
     kind: 'airtime-v1',
@@ -71,39 +70,18 @@ const STATION_MAP = [
   },
   {
     kind: 'airtime-v1',
-    station: 'Skylab Radio',
-    hosts: ['stream.skylab-radio.com'],
-    infoUrl: 'https://skylab-radio.com/api/airtime/current',
-  },
-  {
-    kind: 'airtime-v1',
     station: 'Veneno',
     hosts: ['radio.veneno.live'],
     infoUrl: 'https://radio.veneno.live/api/live-info',
-  },
-  {
-    kind: 'airtime-v1',
-    station: 'Soho Radio',
-    hosts: ['sohoradiomusic.doughunt.co.uk'],
-    infoUrl: 'https://sohoradiomusic.doughunt.co.uk/api/live-info',
-  },
-  {
-    kind: 'wnyu',
-    station: 'WNYU',
-    hosts: ['www.wnyu-ice-cast-relay.com', 'wnyu-ice-cast-relay.com'],
-    infoUrl: 'https://lobster-app-zabc8.ondigitalocean.app/current',
   },
 ];
 
 const CACHE_TTL_BY_KIND = {
   creek: 30,
   kexp: 15,
-  bff: 30,
   ckut: 120,
   'icecast-allstats': 15,
-  azuracast: 15,
   'airtime-v1': 30,
-  wnyu: 60,
   wwoz: 60,
 };
 
@@ -195,17 +173,6 @@ function parseKEXPPlay(data) {
   return toResult(display, artist, song);
 }
 
-function parseBFFNow(data) {
-  if (!data || typeof data !== 'object') return null;
-  const artist = typeof data.artist === 'string' ? data.artist.trim() : '';
-  const title = typeof data.title === 'string' ? data.title.trim() : '';
-  const program = typeof data.program === 'string' ? data.program.trim() : '';
-
-  if (artist && title && artist !== title) return toResult(`${artist} - ${title}`, artist, title);
-  if (title) return toResult(title, artist, title);
-  if (program) return toResult(program);
-  return null;
-}
 
 function parseCKUTShows(data) {
   const raw = data?.program?.title_html;
@@ -242,11 +209,6 @@ function parseIcecastAllStats(data, streamUrl) {
   return toResult(title || artist, artist, title);
 }
 
-function parseWNYUCurrent(data) {
-  const title = data?.playlist?.title;
-  if (typeof title !== 'string' || !title.trim()) return null;
-  return toResult(title);
-}
 
 // WWOZ (wwoz.org) exposes no JSON now-playing API; the on-air programme is
 // server-rendered into the page header:
@@ -267,11 +229,9 @@ function parseByKind(kind, data, streamUrl) {
   switch (kind) {
     case 'creek': return parseCreekCurrent(data);
     case 'kexp': return parseKEXPPlay(data);
-    case 'bff': return parseBFFNow(data);
     case 'ckut': return parseCKUTShows(data);
     case 'icecast-allstats': return parseIcecastAllStats(data, streamUrl);
     case 'airtime-v1': return parseAirtimeV1(data);
-    case 'wnyu': return parseWNYUCurrent(data);
     case 'wwoz': return parseWWOZOnAir(data);
     // 'azuracast' is dispatched in strategies/index.js — its parser is shared
     // with the derived-endpoint AzuraCast strategy there.
@@ -289,8 +249,6 @@ module.exports = {
   parseAirtimeV1,
   parseCreekCurrent,
   parseKEXPPlay,
-  parseBFFNow,
   parseCKUTShows,
   parseIcecastAllStats,
-  parseWNYUCurrent,
 };

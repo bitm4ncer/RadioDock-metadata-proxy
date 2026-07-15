@@ -1,6 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isStationEcho } = require('../lib/normalize.js');
+const { isStationEcho, isPlaceholder } = require('../lib/normalize.js');
+
+test('holding text a widget shows while fetching is not now-playing', () => {
+  // Live on kalx.berkeley.edu: its now-playing slot renders "waiting ..." until
+  // the site's own script fills it. Exact matching missed it (trailing ellipsis).
+  assert.equal(isPlaceholder('waiting ...'), true);
+  assert.equal(isPlaceholder('Loading…'), true);
+  assert.equal(isPlaceholder('please wait'), true);
+  assert.equal(isPlaceholder('TBA'), true);
+  // Must not swallow real content that merely starts with such a word.
+  assert.equal(isPlaceholder('Waiting Room - Fugazi'), false);
+  assert.equal(isPlaceholder('Loading Zone'), false);
+});
 
 // The generic engine reads unknown JSON and homepage HTML. Its worst failure is
 // not "no metadata" — it is confidently showing the station's own name or the

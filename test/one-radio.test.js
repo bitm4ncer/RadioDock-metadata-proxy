@@ -17,10 +17,8 @@ const {
   parseAirtimeV1,
   parseCreekCurrent,
   parseKEXPPlay,
-  parseBFFNow,
   parseCKUTShows,
   parseIcecastAllStats,
-  parseWNYUCurrent,
 } = require('../strategies/station-map.js');
 
 const fixture = (name) =>
@@ -130,24 +128,33 @@ test('isValidMetadata: filters LibreTime offline placeholders', () => {
 test('findStationMapEntry: resolves known stream hosts (port ignored)', () => {
   const cases = [
     ['https://stream.kalx.berkeley.edu:8443/kalx-128.mp3', 'creek'],
-    ['https://listen.kusf.org/stream', 'creek'],
     ['https://kexp-mp3-128.streamguys1.com/kexp128.mp3', 'kexp'],
-    ['https://stream.bff.fm/1/mp3.mp3', 'bff'],
     ['https://delray.ckut.ca:8001/903fm-192-stereo', 'ckut'],
     ['https://transliacija.audiomastering.lt/radiovilnius-mp3', 'icecast-allstats'],
-    ['https://radio.kwsx.online/assets/playlists/high/kwsx.m3u', 'azuracast'],
     ['https://radio.syg.ma/audio.mp3', 'airtime-v1'],
     ['https://libretime.radioquantica.com/main.mp3', 'airtime-v1'],
-    ['https://stream.skylab-radio.com/live', 'airtime-v1'],
     ['https://radio.veneno.live/stream/main', 'airtime-v1'],
-    ['https://sohoradiomusic.doughunt.co.uk:8010/320mp3', 'airtime-v1'],
-    ['https://www.wnyu-ice-cast-relay.com/wnyu.mp3', 'wnyu'],
   ];
   for (const [url, kind] of cases) {
     const entry = findStationMapEntry(url);
     assert.ok(entry, `expected entry for ${url}`);
     assert.equal(entry.kind, kind, `expected ${kind} for ${url}`);
     assert.ok(entry.infoUrl, `expected infoUrl for ${url}`);
+  }
+});
+
+test('findStationMapEntry: culled stations no longer carry a rule', () => {
+  // Deleted 2026-07-15: plain ICY resolves all of these, and their rules never
+  // won the confidence race. Re-adding one needs evidence, not a hunch.
+  for (const url of [
+    'https://listen.kusf.org/stream',
+    'https://stream.bff.fm/1/mp3.mp3',
+    'https://radio.kwsx.online/assets/playlists/high/kwsx.m3u',
+    'https://stream.skylab-radio.com/live',
+    'https://sohoradiomusic.doughunt.co.uk:8010/320mp3',
+    'https://www.wnyu-ice-cast-relay.com/wnyu.mp3',
+  ]) {
+    assert.equal(findStationMapEntry(url), null, `${url} should have no special rule`);
   }
 });
 
@@ -207,15 +214,7 @@ test('parseKEXPPlay: null for airbreak', () => {
   assert.equal(parseKEXPPlay({ results: [] }), null);
 });
 
-test('parseBFFNow: artist - title', () => {
-  const parsed = parseBFFNow(fixture('bff-now'));
-  assert.equal(parsed.display, 'Bikini Kill - Double Dare Ya');
-});
 
-test('parseBFFNow: falls back to program name', () => {
-  const parsed = parseBFFNow({ title: '', artist: '', program: 'Schock Treatment' });
-  assert.equal(parsed.display, 'Schock Treatment');
-});
 
 test('parseCKUTShows: program title with HTML stripped', () => {
   const parsed = parseCKUTShows(fixture('ckut-shows'));
@@ -241,11 +240,4 @@ test('parseIcecastAllStats: null when mount not present', () => {
   );
 });
 
-test('parseWNYUCurrent: playlist title', () => {
-  const parsed = parseWNYUCurrent(fixture('wnyu-current'));
-  assert.equal(parsed.display, 'The Jukebox Joint');
-});
 
-test('parseWNYUCurrent: null without playlist', () => {
-  assert.equal(parseWNYUCurrent({}), null);
-});
