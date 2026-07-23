@@ -110,6 +110,11 @@ async function fetchWithTimeout(url, options = {}, timeout = DEFAULT_TIMEOUT) {
   }
 }
 
+// Swappable so the ICY socket-cleanup contract can be unit-tested without real
+// network (the SSRF guard blocks localhost). Runtime always uses fetchWithTimeout.
+let _icyFetch = fetchWithTimeout;
+function _setIcyFetchForTests(fn) { _icyFetch = fn || fetchWithTimeout; }
+
 
 
 // ICY metadata blocks are not encoding-tagged. The spec leaves charset up to
@@ -1297,9 +1302,10 @@ async function fetchIcecastMetadata(endpoints, mount, { signal } = {}) {
 
 // ICY metadata parsing using the same logic as the working old version (adapted for Node.js)
 async function fetchICYMetadata(streamUrl, { signal } = {}) {
+  let response;
   try {
 
-    const response = await fetchWithTimeout(streamUrl, {
+    response = await _icyFetch(streamUrl, {
       method: 'GET',
       signal,
       headers: {
@@ -1307,7 +1313,7 @@ async function fetchICYMetadata(streamUrl, { signal } = {}) {
         'User-Agent': 'RadioDock/1.0'
       }
     }, 8000);
-    
+
     if (!response.ok) {
       throw new Error(`ICY fetch error: ${response.status}`);
     }
@@ -1413,6 +1419,14 @@ async function fetchICYMetadata(streamUrl, { signal } = {}) {
     if (error.name !== 'AbortError' && !error.message.includes('NetworkError')) {
     }
     return null;
+  } finally {
+    // Always release the upstream socket. ICY streams are effectively infinite;
+    // any exit (header-only, !ok, metadata-found, error) that leaves the body
+    // undrained keeps the connection open and its receive buffer piling up in
+    // kernel TCP memory — the root cause of the proxy's socket / tcp-mem leak.
+    // Idempotent: a body already ended/destroyed by the for-await break is a
+    // no-op here.
+    try { response?.body?.destroy?.(); } catch {}
   }
 }
 
@@ -2062,6 +2076,8 @@ module.exports = {
   isValidMetadata,
   // Exported for tests — not part of the runtime API.
   isPlaceholder,
+  fetchICYMetadata,
+  _setIcyFetchForTests,
   decodeIcyBytes,
   selectBestResult,
   firstNonNullResult,
