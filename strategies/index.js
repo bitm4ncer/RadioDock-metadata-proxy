@@ -1426,7 +1426,16 @@ async function fetchICYMetadata(streamUrl, { signal } = {}) {
     // kernel TCP memory — the root cause of the proxy's socket / tcp-mem leak.
     // Idempotent: a body already ended/destroyed by the for-await break is a
     // no-op here.
-    try { response?.body?.destroy?.(); } catch {}
+    //
+    // The no-op 'error' listener is not optional: destroying a body whose
+    // request was already aborted (every ICY stream that outlives the timeout)
+    // makes undici emit 'error' asynchronously. Unlistened, Node turns that
+    // into an unhandled 'error' event and kills the process — the try/catch
+    // below cannot catch it, because it is emitted after this frame is gone.
+    try {
+      response?.body?.on?.('error', () => {});
+      response?.body?.destroy?.();
+    } catch {}
   }
 }
 
