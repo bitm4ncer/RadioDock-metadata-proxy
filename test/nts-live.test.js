@@ -1,4 +1,4 @@
-const { test, mock } = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -23,7 +23,7 @@ const at = (iso) => Date.parse(iso);
 const STREAM1 = 'http://stream-relay-geo.ntslive.net/stream';
 const STREAM2 = 'http://stream-relay-geo.ntslive.net/stream2';
 
-// --- slot selection (pure) ---
+// --- slot selection (pure, fixed timestamps) ---
 
 test('picks `now` while the show is actually on air', () => {
   const slot = pickNTSBroadcast(channel1(), at('2026-08-11T14:30:00+01:00'));
@@ -59,7 +59,7 @@ test('unparseable timestamps fall back to `now` instead of losing metadata', () 
   assert.equal(pickNTSBroadcast(ch, at('2026-08-11T15:20:00+01:00')).broadcast_title, 'Tropic of Love w/ Mafalda');
 });
 
-// --- ttl (pure) ---
+// --- ttl (pure, fixed timestamps) ---
 
 test('cacheTtl is the remaining runtime so the poll lands on the changeover', () => {
   const slot = channel1().now; // ends 15:00
@@ -74,6 +74,32 @@ test('cacheTtl is clamped to [30, 900]', () => {
 });
 
 // --- fetch behaviour ---
+//
+// These drive the real clock (node 18's mock timers cannot fake Date), so the
+// documents are built relative to now and the assertions carry a few seconds
+// of tolerance.
+
+const MIN = 60_000;
+const iso = (offsetMs) => new Date(Date.now() + offsetMs).toISOString();
+
+function slot(title, startMinFromNow, endMinFromNow) {
+  return {
+    broadcast_title: title,
+    start_timestamp: iso(startMinFromNow * MIN),
+    end_timestamp: iso(endMinFromNow * MIN),
+    embeds: { details: { name: title } },
+  };
+}
+
+// `slots` are [title, startMinFromNow, endMinFromNow] triples, `now` first.
+function doc(channel1Slots, channel2Slots = [['Low Key', -30, 30]]) {
+  const build = (name, list) => {
+    const ch = { channel_name: name, now: slot(...list[0]) };
+    list.slice(1).forEach((s, i) => { ch[i === 0 ? 'next' : `next${i + 1}`] = slot(...s); });
+    return ch;
+  };
+  return { results: [build('1', channel1Slots), build('2', channel2Slots)] };
+}
 
 function withNtsFetch(handler, run) {
   const calls = [];
@@ -84,81 +110,67 @@ function withNtsFetch(handler, run) {
   return Promise.resolve(run(calls)).finally(() => _setNtsFetchForTests(null));
 }
 
+const near = (actual, expected, tolerance, label) =>
+  assert.ok(Math.abs(actual - expected) <= tolerance, `${label}: expected ~${expected}, got ${actual}`);
+
 test('on-air show costs exactly one edge request, no cache-buster', async () => {
-  mock.timers.enable({ apis: ['Date'], now: at('2026-08-11T14:30:00+01:00') });
-  try {
-    await withNtsFetch(() => live(), async (calls) => {
-      const r = await fetchNTSMetadata(STREAM1, null, {});
-      assert.equal(r.display, 'Tropic of Love w/ Mafalda');
-      assert.equal(r.source, 'nts');
-      assert.equal(r.cacheTtl, 900, 'clamped remaining runtime');
-      assert.deepEqual(calls, ['https://www.nts.live/api/v2/live']);
-    });
-  } finally {
-    mock.timers.reset();
-  }
+  const edge = doc([['Tropic of Love w/ Mafalda', -30, 40], ['Self Soothe w/ Margeaux', 40, 100]]);
+  await withNtsFetch(() => edge, async (calls) => {
+    const r = await fetchNTSMetadata(STREAM1, null, {});
+    assert.equal(r.display, 'Tropic of Love w/ Mafalda');
+    assert.equal(r.source, 'nts');
+    assert.equal(r.cacheTtl, 900, '40 min left, clamped to the ceiling');
+    assert.deepEqual(calls, ['https://www.nts.live/api/v2/live']);
+  });
+});
+
+test('cacheTtl tracks the changeover once the show is nearly over', async () => {
+  const edge = doc([['Tropic of Love w/ Mafalda', -110, 4], ['Self Soothe w/ Margeaux', 4, 64]]);
+  await withNtsFetch(() => edge, async () => {
+    const r = await fetchNTSMetadata(STREAM1, null, {});
+    near(r.cacheTtl, 240, 2, 'four minutes of show left');
+  });
 });
 
 test('a stale edge document is served from its own timetable, still one request', async () => {
-  mock.timers.enable({ apis: ['Date'], now: at('2026-08-11T15:20:00+01:00') });
-  try {
-    await withNtsFetch(() => live(), async (calls) => {
-      const r = await fetchNTSMetadata(STREAM1, null, {});
-      assert.equal(r.display, 'Self Soothe w/ Margeaux');
-      assert.equal(r.cacheTtl, 900, '40 min left, clamped to the ceiling');
-      assert.equal(calls.length, 1, 'no origin hit needed — the answer was in the stale document');
-    });
-  } finally {
-    mock.timers.reset();
-  }
+  // The edge is 20 minutes behind: `now` ended, `next` is the show on air.
+  const edge = doc([['Tropic of Love w/ Mafalda', -90, -20], ['Self Soothe w/ Margeaux', -20, 40]]);
+  await withNtsFetch(() => edge, async (calls) => {
+    const r = await fetchNTSMetadata(STREAM1, null, {});
+    assert.equal(r.display, 'Self Soothe w/ Margeaux');
+    assert.equal(calls.length, 1, 'no origin hit needed — the answer was in the stale document');
+  });
 });
 
 test('when the timetable is exhausted it refetches once past the edge cache', async () => {
-  const now = at('2026-08-11T18:20:00+01:00');
-  mock.timers.enable({ apis: ['Date'], now });
-  try {
-    const fresh = live();
-    fresh.results[0].now = {
-      broadcast_title: 'Sunlight w/ Kelly',
-      start_timestamp: '2026-08-11T18:00:00+01:00',
-      end_timestamp: '2026-08-11T19:00:00+01:00',
-      embeds: { details: { name: 'Sunlight w/ Kelly' } },
-    };
-    await withNtsFetch((url) => (url.includes('?') ? fresh : live()), async (calls) => {
-      const r = await fetchNTSMetadata(STREAM1, null, {});
-      assert.equal(r.display, 'Sunlight w/ Kelly');
-      assert.equal(calls.length, 2, 'edge attempt, then one busted refetch');
-      // Bucketed to the minute so concurrent listeners share a single origin miss.
-      assert.equal(calls[1], `https://www.nts.live/api/v2/live?_=${Math.floor(now / 60000)}`);
-    });
-  } finally {
-    mock.timers.reset();
-  }
+  const stale = doc([['Long Gone', -180, -120], ['Also Gone', -120, -60]]);
+  const fresh = doc([['Sunlight w/ Kelly', -10, 50]]);
+  await withNtsFetch((url) => (url.includes('?') ? fresh : stale), async (calls) => {
+    const r = await fetchNTSMetadata(STREAM1, null, {});
+    assert.equal(r.display, 'Sunlight w/ Kelly');
+    assert.equal(calls.length, 2, 'edge attempt, then one busted refetch');
+    const bucket = Number(/\?_=(\d+)$/.exec(calls[1])?.[1]);
+    // Bucketed to the minute so concurrent listeners share a single origin miss.
+    near(bucket, Math.floor(Date.now() / MIN), 1, 'minute bucket');
+  });
 });
 
 test('gives up cleanly when even the fresh document has nothing on air', async () => {
-  mock.timers.enable({ apis: ['Date'], now: at('2026-08-11T18:20:00+01:00') });
-  try {
-    await withNtsFetch(() => live(), async (calls) => {
-      assert.equal(await fetchNTSMetadata(STREAM1, null, {}), null);
-      assert.equal(calls.length, 2);
-    });
-  } finally {
-    mock.timers.reset();
-  }
+  const exhausted = doc([['Long Gone', -180, -120], ['Also Gone', -120, -60]]);
+  await withNtsFetch(() => exhausted, async (calls) => {
+    assert.equal(await fetchNTSMetadata(STREAM1, null, {}), null);
+    assert.equal(calls.length, 2);
+  });
 });
 
 test('/stream2 resolves against channel 2', async () => {
-  mock.timers.enable({ apis: ['Date'], now: at('2026-08-11T14:30:00+01:00') });
-  try {
-    await withNtsFetch(() => live(), async () => {
-      const r = await fetchNTSMetadata(STREAM2, null, {});
-      assert.equal(r.display, 'Low Key');
-      assert.equal(r.raw.channel, 'NTS 2');
-    });
-  } finally {
-    mock.timers.reset();
-  }
+  const edge = doc([['Tropic of Love w/ Mafalda', -30, 40]], [['Sofay & Ribeka', -30, 4]]);
+  await withNtsFetch(() => edge, async () => {
+    const r = await fetchNTSMetadata(STREAM2, null, {});
+    assert.equal(r.display, 'Sofay & Ribeka');
+    assert.equal(r.raw.channel, 'NTS 2');
+    near(r.cacheTtl, 240, 2, 'ttl comes from channel 2, not channel 1');
+  });
 });
 
 test('non-NTS urls are not claimed by the strategy', async () => {
