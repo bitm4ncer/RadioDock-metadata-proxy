@@ -1,0 +1,41 @@
+{
+  "_comment": "Trimmed capture of https://www.nts.live/api/v2/live (2026-08-11). Only the fields the strategy reads are kept; the live payload carries the same shape with 17 `next*` slots and a large `embeds.details` block per slot.",
+  "results": [
+    {
+      "channel_name": "1",
+      "now": {
+        "broadcast_title": "Tropic of Love w/ Mafalda",
+        "start_timestamp": "2026-08-11T13:00:00+01:00",
+        "end_timestamp": "2026-08-11T15:00:00+01:00",
+        "embeds": { "details": { "name": "Tropic of Love w/ Mafalda " } }
+      },
+      "next": {
+        "broadcast_title": "Self Soothe w/ Margeaux",
+        "start_timestamp": "2026-08-11T15:00:00+01:00",
+        "end_timestamp": "2026-08-11T16:00:00+01:00",
+        "embeds": { "details": { "name": "Self Soothe w/ Margeaux" } }
+      },
+      "next2": {
+        "broadcast_title": "Kültür Hour",
+        "start_timestamp": "2026-08-11T16:00:00+01:00",
+        "end_timestamp": "2026-08-11T17:00:00+01:00",
+        "embeds": { "details": { "name": "Kültür Hour" } }
+      }
+    },
+    {
+      "channel_name": "2",
+      "now": {
+        "broadcast_title": "Sunday Roast",
+        "start_timestamp": "2026-08-11T13:00:00+01:00",
+        "end_timestamp": "2026-08-11T14:00:00+01:00",
+        "embeds": { "details": { "name": "Sunday Roast" } }
+      },
+      "next": {
+        "broadcast_title": "Low Key",
+        "start_timestamp": "2026-08-11T14:00:00+01:00",
+        "end_timestamp": "2026-08-11T15:00:00+01:00",
+        "embeds": { "details": { "name": "Low Key" } }
+      }
+    }
+  ]
+}

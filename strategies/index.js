@@ -386,6 +386,81 @@ async function fetchHKCRMetadata({ signal } = {}) {
 }
 
 // NTS Radio API integration
+//
+// nts.live/api/v2/live is served through CloudFront with `Cache-Control:
+// max-age=900`, and the edge really does sit on it — measured `Age: 751` on a
+// plain request. So `now` routinely describes a show that ended a quarter of an
+// hour ago, and no polling interval on our side or the client's can shorten
+// that. Two defences, both fed by data NTS publishes itself:
+//
+//   1. Pick the broadcast whose [start, end) window covers the current time.
+//      A stale document already carries the on-air show in `next`/`next2`/…,
+//      so the common changeover costs no extra request at all.
+//   2. Only when even that timetable has run out do we go past the edge, with
+//      the buster bucketed to the minute so every listener on the channel
+//      shares one origin miss instead of each triggering their own.
+//
+// cacheTtl is the show's remaining runtime, which makes our cache entry and the
+// client's next poll land on the changeover instead of drifting past it.
+const NTS_LIVE_URL = 'https://www.nts.live/api/v2/live';
+const NTS_MIN_TTL = 30;
+const NTS_MAX_TTL = 900;
+
+// Channel objects carry the running show in `now` and the schedule ahead in
+// `next`, `next2` … `next17`.
+function ntsSlots(channel) {
+  if (!channel || typeof channel !== 'object') return [];
+  const slots = channel.now ? [channel.now] : [];
+  for (let i = 1; i <= 17; i++) {
+    const slot = channel[i === 1 ? 'next' : `next${i}`];
+    if (slot) slots.push(slot);
+  }
+  return slots;
+}
+
+function ntsSlotWindow(slot) {
+  const start = Date.parse(slot?.start_timestamp ?? '');
+  const end = Date.parse(slot?.end_timestamp ?? '');
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
+function pickNTSBroadcast(channel, nowMs) {
+  const slots = ntsSlots(channel);
+  for (const slot of slots) {
+    const window = ntsSlotWindow(slot);
+    if (window && nowMs >= window.start && nowMs < window.end) return slot;
+  }
+  // Only claim staleness when the timestamps actually prove it. Unparseable or
+  // missing ones must not cost a station its metadata.
+  if (channel?.now && !ntsSlotWindow(channel.now)) return channel.now;
+  return null;
+}
+
+function ntsCacheTtl(slot, nowMs) {
+  const window = ntsSlotWindow(slot);
+  if (!window) return NTS_MIN_TTL;
+  const remaining = Math.ceil((window.end - nowMs) / 1000);
+  return Math.min(NTS_MAX_TTL, Math.max(NTS_MIN_TTL, remaining));
+}
+
+let ntsFetchImpl = null;
+function _setNtsFetchForTests(impl) {
+  ntsFetchImpl = impl;
+}
+
+async function fetchNTSLive(query, { signal } = {}) {
+  const url = `${NTS_LIVE_URL}${query}`;
+  if (ntsFetchImpl) return ntsFetchImpl(url, { signal });
+  const response = await fetchWithTimeout(url, { signal }, 5000);
+  if (!response.ok) throw new Error(`NTS API error: ${response.status}`);
+  return response.json();
+}
+
+function findNTSChannel(data, targetChannel) {
+  const channels = data?.results || [];
+  return channels.find((r) => r.channel_name === targetChannel) || channels[0] || null;
+}
+
 async function fetchNTSMetadata(streamUrl, stationId, { signal } = {}) {
   try {
     // Only use NTS API for main live channels (stream-relay)
@@ -393,43 +468,41 @@ async function fetchNTSMetadata(streamUrl, stationId, { signal } = {}) {
       return null;
     }
 
-    const response = await fetchWithTimeout('https://www.nts.live/api/v2/live', { signal }, 5000);
-    if (!response.ok) throw new Error(`NTS API error: ${response.status}`);
-    
-    const data = await response.json();
-    const channels = data.results || [];
-    
-    // Detect channel from stream URL
-    let targetChannel = '1'; // default for /stream
-    if (streamUrl.includes('/stream2')) {
-      targetChannel = '2';
-    }
-    
-    // Find the matching channel
-    let channel = channels.find(r => r.channel_name === targetChannel) || channels[0];
-    
-    if (channel && channel.now) {
-      const now = channel.now;
-      
-      // Use broadcast_title as the main content, it contains the track info
-      let nowPlaying = now.broadcast_title || now.title || '';
-      
-      // If we have artist info from embeds, use that instead
-      if (now.embeds?.details?.name) {
-        nowPlaying = now.embeds.details.name;
+    const targetChannel = streamUrl.includes('/stream2') ? '2' : '1';
+
+    let channel = findNTSChannel(await fetchNTSLive('', { signal }), targetChannel);
+    let nowMs = Date.now();
+    let broadcast = pickNTSBroadcast(channel, nowMs);
+
+    if (!broadcast) {
+      const bucket = Math.floor(Date.now() / 60000);
+      const fresh = findNTSChannel(await fetchNTSLive(`?_=${bucket}`, { signal }), targetChannel);
+      if (fresh) {
+        channel = fresh;
+        nowMs = Date.now();
+        broadcast = pickNTSBroadcast(channel, nowMs);
       }
-      
+    }
+
+    if (broadcast) {
+      // broadcast_title carries the show; embeds.details.name is the same thing
+      // with the episode's own capitalisation, so it wins when present.
+      let nowPlaying = broadcast.embeds?.details?.name
+        || broadcast.broadcast_title
+        || broadcast.title
+        || '';
+
       nowPlaying = cleanNowPlaying(nowPlaying);
-      
+
       if (nowPlaying) {
         return {
           source: 'nts',
           display: nowPlaying,
           artist: null,
           title: null,
-          raw: { channel: channel.channel_name === '2' ? 'NTS 2' : 'NTS 1', ...now },
+          raw: { channel: channel.channel_name === '2' ? 'NTS 2' : 'NTS 1', ...broadcast },
           confidence: 0.9,
-          cacheTtl: 30
+          cacheTtl: ntsCacheTtl(broadcast, nowMs),
         };
       }
     }
@@ -2091,6 +2164,10 @@ module.exports = {
   parseRadioJarNowPlaying,
   isNTSMixtapeStreamUrl,
   findNTSMixtape,
+  fetchNTSMetadata,
+  pickNTSBroadcast,
+  ntsCacheTtl,
+  _setNtsFetchForTests,
   parseAzuraCastNowPlaying,
   parseAirtimeProNowPlaying,
   resolvePath,
