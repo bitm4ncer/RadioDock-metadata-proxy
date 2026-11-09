@@ -44,7 +44,11 @@ function _setHomepageTierForTests(fn) { homepageTier = fn || resolveHomepage; }
 // proxy instances consume it; degrades to empty on any failure. start() is
 // called from server.js at boot (kept side-effect-free here for tests).
 const overrideMap = makeOverrideMap({
-  url: process.env.OVERRIDE_MAP_URL || 'https://radiodock.app/public/metadata-overrides.json',
+  // Vite copies public/ to the site root, so the published file is served at
+  // /metadata-overrides.json — not /public/metadata-overrides.json. The old
+  // path 404'd, leaving the entire curated override map empty (58 rows in the
+  // database, zero in the proxy).
+  url: process.env.OVERRIDE_MAP_URL || 'https://radiodock.app/metadata-overrides.json',
   ttlMs: Number(process.env.OVERRIDE_MAP_TTL_MS) || 300000,
 });
 
