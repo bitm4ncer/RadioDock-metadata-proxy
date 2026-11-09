@@ -88,6 +88,7 @@ const CACHE_TTL_BY_KIND = {
   'icecast-allstats': 15,
   'airtime-v1': 30,
   wwoz: 60,
+  thelotradio: 60,
 };
 
 function findStationMapEntry(streamUrl) {
@@ -227,8 +228,76 @@ function parseWWOZOnAir(html) {
   return toResult(text);
 }
 
+// The Lot Radio (thelotradio.com) publishes no track API and its HLS is a
+// video+audio Livepeer stream with no in-band ID3. The only now-playing data is
+// the station's own schedule, server-rendered into the Next.js RSC payload as a
+// JSON array. The current entry's `summary` is the programme actually on air
+// (e.g. "RESTREAM" overnight, then "Bottom Of The Deck with Druggy Paul").
+//
+// This is deliberately an HTML kind (the override points at the homepage), not
+// a homepage-tier heuristic: the RSC stream is not machine-readable HTML, and
+// the generic probe cannot see it.
+const THELOT_MAX_HTML = 2 * 1024 * 1024;
+
+function nextPushPayload(html) {
+  let payload = '';
+  for (const m of html.matchAll(/self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g)) {
+    try { payload += JSON.parse(m[1]); } catch { /* skip malformed row */ }
+  }
+  return payload;
+}
+
+function extractJsonArray(text, key) {
+  const i = text.indexOf(key);
+  if (i < 0) return null;
+  const start = text.indexOf('[', i + key.length - 1);
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let j = start; j < text.length; j++) {
+    const ch = text[j];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '[' || ch === '{') depth++;
+    else if (ch === ']' || ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, j + 1);
+    }
+  }
+  return null;
+}
+
+function parseTheLotSchedule(html, now = Date.now()) {
+  if (typeof html !== 'string' || !html || html.length > THELOT_MAX_HTML) return null;
+  const payload = nextPushPayload(html);
+  if (!payload) return null;
+  const json = extractJsonArray(payload, '"schedule":');
+  if (!json) return null;
+  let entries;
+  try { entries = JSON.parse(json); } catch { return null; }
+  if (!Array.isArray(entries)) return null;
+  const instant = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  let best = null;
+  for (const entry of entries) {
+    if (!entry || typeof entry.summary !== 'string') continue;
+    const start = Date.parse(entry.start);
+    const end = Date.parse(entry.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (start <= instant && instant < end && (!best || start > best.start)) {
+      best = { start, summary: entry.summary };
+    }
+  }
+  return best ? toResult(best.summary) : null;
+}
+
 // Kinds whose infoUrl returns HTML rather than JSON — fetched via response.text().
-const HTML_KINDS = new Set(['wwoz']);
+const HTML_KINDS = new Set(['wwoz', 'thelotradio']);
 
 function parseByKind(kind, data, streamUrl) {
   switch (kind) {
@@ -238,6 +307,7 @@ function parseByKind(kind, data, streamUrl) {
     case 'icecast-allstats': return parseIcecastAllStats(data, streamUrl);
     case 'airtime-v1': return parseAirtimeV1(data);
     case 'wwoz': return parseWWOZOnAir(data);
+    case 'thelotradio': return parseTheLotSchedule(data);
     // 'azuracast' is dispatched in strategies/index.js — its parser is shared
     // with the derived-endpoint AzuraCast strategy there.
     default: return null;
@@ -251,6 +321,7 @@ module.exports = {
   findStationMapEntry,
   parseByKind,
   parseWWOZOnAir,
+  parseTheLotSchedule,
   parseAirtimeV1,
   parseCreekCurrent,
   parseKEXPPlay,
